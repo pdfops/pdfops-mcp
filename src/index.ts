@@ -25,7 +25,7 @@ const client = new PdfOps({
 
 const server = new McpServer({
   name: 'pdfops',
-  version: '0.1.0',
+  version: '0.1.1',
 });
 
 const errText = (e: unknown): string =>
