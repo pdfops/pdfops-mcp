@@ -1,0 +1,37 @@
+{
+  "name": "pdfops-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for the PDFops API \u2014 give AI agents deterministic PDF tools: inspect AcroForm fields, fill forms, merge PDFs, and generate invoices. Works with Claude Code, Claude Desktop, Cursor, and any MCP client.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "pdf",
+    "acroform",
+    "fill-pdf",
+    "merge-pdf",
+    "invoice",
+    "ai-agent",
+    "claude",
+    "cursor"
+  ],
+  "homepage": "https://pdfops.dev",
+  "bugs": "mailto:hello@pdfops.dev",
+  "author": "PDFops <hello@pdfops.dev> (https://pdfops.dev)",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "pdfops-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "pdfops-sdk": "^0.3.0",
+    "zod": "^3.23.0"
+  }
+}
