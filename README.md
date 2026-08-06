@@ -33,7 +33,7 @@ claude mcp add pdfops -- npx -y pdfops-mcp
 | Tool | What it does |
 |---|---|
 | `pdf_inspect` | List a PDF's form fields (names, types, options, values) + a paste-ready fill template. Call first on unfamiliar PDFs. |
-| `pdf_fill` | Fill AcroForm fields → write the filled PDF. |
+| `pdf_fill` | Fill AcroForm fields → write the filled PDF. Optional `flatten` bakes values in and drops the form. |
 | `pdf_merge` | Merge ≥2 PDFs in order → write the result. |
 | `pdf_invoice` | Structured data → complete invoice PDF. Deterministic: same input, byte-identical output. |
 | `pdfops_usage` | Quota check for the configured key. |
