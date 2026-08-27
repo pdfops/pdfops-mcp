@@ -20,6 +20,10 @@
   "author": "PDFops <hello@pdfops.dev> (https://pdfops.dev)",
   "license": "MIT",
   "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
   "bin": {
     "pdfops-mcp": "./dist/index.js"
   },
@@ -38,5 +42,9 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/pdfops/pdfops-mcp.git"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.6.0"
   }
 }
