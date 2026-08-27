@@ -5,11 +5,18 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
+        # Must cover the floor declared in package.json engines.node.
+        # @hono/node-server (a prod transitive of @modelcontextprotocol/sdk)
+        # requires node >=20, which is why the floor is 20 and not 18.
         node: ['20', '22', '24']
     steps:
       - uses: actions/checkout@v4
@@ -17,16 +24,47 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+
       - run: npm ci
       - run: npm run build
+
+      - name: Version consistency - src must match package.json
+        run: |
+          PKG=$(node -p "require('./package.json').version")
+          SRV=$(printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            | timeout 30 node dist/index.js 2>/dev/null \
+            | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
+                const l=s.trim().split('\n')[0];
+                process.stdout.write(JSON.parse(l).result.serverInfo.version);
+              })")
+          echo "package.json=$PKG serverInfo=$SRV"
+          [ "$PKG" = "$SRV" ] || { echo "version drift: package.json $PKG != serverInfo $SRV"; exit 1; }
+
       - name: Smoke test - MCP initialize + tools/list over stdio
         run: |
           printf '%s\n' \
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
             '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
             '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-            | timeout 30 node dist/index.js > out.json 2>/dev/null || true
+            | timeout 30 node dist/index.js > out.json 2>err.log || true
           for tool in pdf_inspect pdf_fill pdf_merge pdf_invoice pdfops_usage; do
-            grep -q "\"name\":\"$tool\"" out.json || { echo "missing tool: $tool"; exit 1; }
+            grep -q "\"name\":\"$tool\"" out.json || {
+              echo "missing tool: $tool"; echo "--- stderr ---"; cat err.log; exit 1; }
           done
           echo "all five tools advertised"
+
+      - name: Packaged tarball must contain a runnable bin
+        # Guards the failure that `prepublishOnly` allowed: with dist/ gitignored,
+        # `npm pack` from a clean clone produced a tarball with no dist/ at all,
+        # leaving bin -> ./dist/index.js dangling. `prepare` is the hook that runs
+        # for pack and for git-URL installs; this proves it.
+        run: |
+          rm -rf dist
+          TARBALL=$(npm pack --silent)
+          tar -tzf "$TARBALL" | grep -q 'package/dist/index.js' || {
+            echo "tarball is missing dist/index.js"; tar -tzf "$TARBALL"; exit 1; }
+          mkdir -p /tmp/installcheck && cd /tmp/installcheck && npm init -y >/dev/null
+          npm install --no-save "$GITHUB_WORKSPACE/$TARBALL" >/dev/null
+          test -x node_modules/.bin/pdfops-mcp || { echo "bin not linked/executable"; exit 1; }
+          echo "tarball ships a runnable bin"
