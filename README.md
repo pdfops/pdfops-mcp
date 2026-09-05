@@ -2,7 +2,7 @@
 
 MCP server that gives AI agents deterministic PDF tools, backed by the [PDFops API](https://pdfops.dev): **inspect** AcroForm fields, **fill** forms, **merge** PDFs, and **generate invoices** — no Chromium, no native deps, nothing to host.
 
-Tools operate on local file paths, so PDF bytes never transit the model context: your agent says *"fill /tmp/form.pdf and save to /tmp/out.pdf"* and gets a one-line confirmation back.
+Beside a local agent, tools operate on file paths, so PDF bytes never transit the model context: your agent says *"fill /tmp/form.pdf and save to /tmp/out.pdf"* and gets a one-line confirmation back. Every PDF input also accepts an `https://` URL or a `data:application/pdf;base64,…` URI, and every output can be returned inline instead of written — which is what makes the server work on hosted runtimes (see below).
 
 ## Install
 
@@ -37,6 +37,15 @@ claude mcp add pdfops -- npx -y pdfops-mcp
 | `pdf_merge` | Merge ≥2 PDFs in order → write the result. |
 | `pdf_invoice` | Structured data → complete invoice PDF. Deterministic: same input, byte-identical output. |
 | `pdfops_usage` | Quota check for the configured key. |
+
+## Running remotely (Smithery, Glama hosted, cloud IDE gateways)
+
+A hosted MCP runtime executes this server on a machine where your agent's file paths do not exist. Nothing changes in the config — pass sources the server can reach and skip `output_path`:
+
+- **Inputs** (`pdf_path`, `pdf_paths`): an `https://` URL the server can fetch (≤50 MB), or a `data:application/pdf;base64,…` URI for small files.
+- **Outputs**: omit `output_path` and `pdf_fill` / `pdf_merge` / `pdf_invoice` return the PDF inline as an embedded `application/pdf` resource (`pdfops://filled.pdf`, …) that the client saves. With `output_path` set, the file is written where the *server* runs.
+
+Locally, absolute paths keep working exactly as before and remain the recommended form — bytes stay off the model context.
 
 ## Example agent flow
 

@@ -1,21 +1,31 @@
 #!/usr/bin/env node
 // pdfops-mcp — MCP server exposing the PDFops API as agent tools.
 //
-// Design: tools take/return FILE PATHS, not base64 blobs. This server
-// runs locally (npx pdfops-mcp) beside the agent, so the filesystem is
-// the natural interface — an agent says "fill /tmp/form.pdf and save
-// to /tmp/out.pdf" and the PDF bytes never transit the model context.
+// Design: tools take PDF *sources* and return files or inline PDFs.
+// Beside a local agent (npx pdfops-mcp) the filesystem is the natural
+// interface — "fill /tmp/form.pdf and save to /tmp/out.pdf" — and the PDF
+// bytes never transit the model context. On a hosted runtime (Smithery,
+// Glama hosted, cloud IDE gateways) the agent's paths do not exist on this
+// machine, so every source also accepts an https:// URL or a
+// data:application/pdf;base64 URI, and omitting output_path returns the
+// result inline as an application/pdf resource. See src/source.ts.
 //
 // Env:
 //   PDFOPS_API_KEY  optional — free key from https://pdfops.dev/pricing
 //                   (250 req/mo; keyless works at 100 req/IP/mo)
 //   PDFOPS_BASE_URL optional — API origin override (testing)
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { PdfOps, PdfOpsError } from 'pdfops-sdk';
+import { describeSource, pdfResult, resolveSource } from './source.js';
+
+// Version comes from package.json so the string MCP clients display can no
+// longer drift from the published one (0.2.0 shipped reporting 0.1.1).
+const { version } = createRequire(import.meta.url)('../package.json') as { version: string };
 
 const client = new PdfOps({
   apiKey: process.env.PDFOPS_API_KEY,
@@ -23,10 +33,12 @@ const client = new PdfOps({
   clientTag: 'mcp',
 });
 
-const server = new McpServer({
-  name: 'pdfops',
-  version: '0.2.1', // keep in sync with package.json
-});
+const server = new McpServer({ name: 'pdfops', version });
+
+const SOURCE_DOC =
+  'PDF source: an absolute file path, an https:// URL, or a data:application/pdf;base64,… URI. Use a URL or data URI when this server runs remotely (Smithery, hosted gateways) where local paths do not exist.';
+const OUTPUT_DOC =
+  'Absolute path to write the result. Omit when running remotely: the PDF is then returned inline as an application/pdf resource for the client to save.';
 
 const errText = (e: unknown): string =>
   e instanceof PdfOpsError
@@ -34,31 +46,40 @@ const errText = (e: unknown): string =>
       (e.code === 'rate_limited'
         ? ' — get a free API key (250/mo) at https://pdfops.dev/pricing and set PDFOPS_API_KEY'
         : '')
-    : String(e);
+    : e instanceof Error
+      ? e.message
+      : String(e);
+
+const fail = (e: unknown) => ({ content: [{ type: 'text' as const, text: errText(e) }], isError: true });
+
+const emit = async (bytes: Uint8Array, name: string, summary: string, output_path?: string) => {
+  if (output_path) await writeFile(output_path, bytes);
+  return pdfResult(bytes, name, summary, output_path);
+};
 
 server.tool(
   'pdf_inspect',
   'List a PDF\'s AcroForm form fields — names, types, options, current values, per-field maxLength where declared — plus a paste-ready fillTemplate object for pdf_fill and a hasXFA flag (hybrid AcroForm/XFA inputs lose their XFA layer when filled). A PDF with no form returns count 0. Call this FIRST when filling an unfamiliar PDF: you cannot fill fields whose names you do not know, and values longer than a field\'s maxLength are rejected.',
-  { pdf_path: z.string().describe('Absolute path to the PDF to inspect') },
+  { pdf_path: z.string().describe(SOURCE_DOC) },
   async ({ pdf_path }) => {
     try {
-      const result = await client.inspect(await readFile(pdf_path));
+      const result = await client.inspect(await resolveSource(pdf_path));
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (e) {
-      return { content: [{ type: 'text', text: errText(e) }], isError: true };
+      return fail(e);
     }
   },
 );
 
 server.tool(
   'pdf_fill',
-  'Fill AcroForm form fields in a PDF and save the result. Field names must exist in the PDF (use pdf_inspect first). All values are strings; checkboxes take "true"/"false"; dropdown/radio/optionlist values must be one of the field\'s options; text values must respect the field\'s maxLength from pdf_inspect. Encrypted PDFs are rejected with decrypt advice (common for government blanks with an empty user password).',
+  'Fill AcroForm form fields in a PDF and save or return the result. Field names must exist in the PDF (use pdf_inspect first). All values are strings; checkboxes take "true"/"false"; dropdown/radio/optionlist values must be one of the field\'s options; text values must respect the field\'s maxLength from pdf_inspect. Encrypted PDFs are rejected with decrypt advice (common for government blanks with an empty user password).',
   {
-    pdf_path: z.string().describe('Absolute path to the template PDF'),
+    pdf_path: z.string().describe(`Template ${SOURCE_DOC}`),
     fields: z
       .record(z.string())
       .describe('Field name → string value (from pdf_inspect\'s fillTemplate)'),
-    output_path: z.string().describe('Absolute path to write the filled PDF'),
+    output_path: z.string().optional().describe(OUTPUT_DOC),
     flatten: z
       .boolean()
       .optional()
@@ -66,41 +87,28 @@ server.tool(
   },
   async ({ pdf_path, fields, output_path, flatten }) => {
     try {
-      const bytes = await client.fillForm(await readFile(pdf_path), fields, { flatten });
-      await writeFile(output_path, bytes);
-      return {
-        content: [
-          { type: 'text', text: `Filled PDF written to ${output_path} (${bytes.byteLength} bytes)` },
-        ],
-      };
+      const bytes = await client.fillForm(await resolveSource(pdf_path), fields, { flatten });
+      return await emit(bytes, 'filled.pdf', `Filled ${describeSource(pdf_path)}`, output_path);
     } catch (e) {
-      return { content: [{ type: 'text', text: errText(e) }], isError: true };
+      return fail(e);
     }
   },
 );
 
 server.tool(
   'pdf_merge',
-  'Merge two or more PDFs into one, in the order given, and save the result.',
+  'Merge two or more PDFs into one, in the order given, and save or return the result.',
   {
-    pdf_paths: z
-      .array(z.string())
-      .min(2)
-      .describe('Absolute paths of the PDFs to merge, in order'),
-    output_path: z.string().describe('Absolute path to write the merged PDF'),
+    pdf_paths: z.array(z.string()).min(2).describe(`In order, each a ${SOURCE_DOC}`),
+    output_path: z.string().optional().describe(OUTPUT_DOC),
   },
   async ({ pdf_paths, output_path }) => {
     try {
-      const inputs = await Promise.all(pdf_paths.map((p) => readFile(p)));
+      const inputs = await Promise.all(pdf_paths.map((p) => resolveSource(p)));
       const bytes = await client.merge(inputs);
-      await writeFile(output_path, bytes);
-      return {
-        content: [
-          { type: 'text', text: `Merged ${pdf_paths.length} PDFs into ${output_path} (${bytes.byteLength} bytes)` },
-        ],
-      };
+      return await emit(bytes, 'merged.pdf', `Merged ${pdf_paths.length} PDFs`, output_path);
     } catch (e) {
-      return { content: [{ type: 'text', text: errText(e) }], isError: true };
+      return fail(e);
     }
   },
 );
@@ -140,19 +148,15 @@ server.tool(
         notes: z.string().max(1000).optional(),
       })
       .describe('Invoice data'),
-    output_path: z.string().describe('Absolute path to write the invoice PDF'),
+    output_path: z.string().optional().describe(OUTPUT_DOC),
   },
   async ({ invoice, output_path }) => {
     try {
       const bytes = await client.invoice(invoice);
-      await writeFile(output_path, bytes);
-      return {
-        content: [
-          { type: 'text', text: `Invoice written to ${output_path} (${bytes.byteLength} bytes)` },
-        ],
-      };
+      const name = invoice.invoice_number ? `invoice-${invoice.invoice_number}.pdf` : 'invoice.pdf';
+      return await emit(bytes, name, 'Invoice', output_path);
     } catch (e) {
-      return { content: [{ type: 'text', text: errText(e) }], isError: true };
+      return fail(e);
     }
   },
 );
@@ -166,7 +170,7 @@ server.tool(
       const usage = await client.usage();
       return { content: [{ type: 'text', text: JSON.stringify(usage, null, 2) }] };
     } catch (e) {
-      return { content: [{ type: 'text', text: errText(e) }], isError: true };
+      return fail(e);
     }
   },
 );
