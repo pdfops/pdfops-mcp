@@ -18,6 +18,8 @@
 import { writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+// Tool annotations (title + readOnlyHint/destructiveHint) are mandatory for the
+// Claude Connectors Directory and help every client show what a tool does.
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { PdfOps, PdfOpsError } from 'pdfops-sdk';
@@ -57,10 +59,14 @@ const emit = async (bytes: Uint8Array, name: string, summary: string, output_pat
   return pdfResult(bytes, name, summary, output_path);
 };
 
-server.tool(
+server.registerTool(
   'pdf_inspect',
-  'List a PDF\'s AcroForm form fields — names, types, options, current values, per-field maxLength where declared — plus a paste-ready fillTemplate object for pdf_fill and a hasXFA flag (hybrid AcroForm/XFA inputs lose their XFA layer when filled). A PDF with no form returns count 0. Call this FIRST when filling an unfamiliar PDF: you cannot fill fields whose names you do not know, and values longer than a field\'s maxLength are rejected.',
-  { pdf_path: z.string().describe(SOURCE_DOC) },
+  {
+    title: 'Inspect PDF form fields',
+    description: 'List a PDF\'s AcroForm form fields — names, types, options, current values, per-field maxLength where declared — plus a paste-ready fillTemplate object for pdf_fill and a hasXFA flag (hybrid AcroForm/XFA inputs lose their XFA layer when filled). A PDF with no form returns count 0. Call this FIRST when filling an unfamiliar PDF: you cannot fill fields whose names you do not know, and values longer than a field\'s maxLength are rejected.',
+    inputSchema: { pdf_path: z.string().describe(SOURCE_DOC) },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
   async ({ pdf_path }) => {
     try {
       const result = await client.inspect(await resolveSource(pdf_path));
@@ -71,19 +77,23 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   'pdf_fill',
-  'Fill AcroForm form fields in a PDF and save or return the result. Field names must exist in the PDF (use pdf_inspect first). All values are strings; checkboxes take "true"/"false"; dropdown/radio/optionlist values must be one of the field\'s options; text values must respect the field\'s maxLength from pdf_inspect. Encrypted PDFs are rejected with decrypt advice (common for government blanks with an empty user password).',
   {
-    pdf_path: z.string().describe(`Template ${SOURCE_DOC}`),
-    fields: z
-      .record(z.string())
-      .describe('Field name → string value (from pdf_inspect\'s fillTemplate)'),
-    output_path: z.string().optional().describe(OUTPUT_DOC),
-    flatten: z
-      .boolean()
-      .optional()
-      .describe('Bake values into page content and drop the AcroForm so fields are no longer editable'),
+    title: 'Fill PDF form',
+    description: 'Fill AcroForm form fields in a PDF and save or return the result. Field names must exist in the PDF (use pdf_inspect first). All values are strings; checkboxes take "true"/"false"; dropdown/radio/optionlist values must be one of the field\'s options; text values must respect the field\'s maxLength from pdf_inspect. Encrypted PDFs are rejected with decrypt advice (common for government blanks with an empty user password).',
+    inputSchema: {
+      pdf_path: z.string().describe(`Template ${SOURCE_DOC}`),
+      fields: z
+        .record(z.string())
+        .describe('Field name → string value (from pdf_inspect\'s fillTemplate)'),
+      output_path: z.string().optional().describe(OUTPUT_DOC),
+      flatten: z
+        .boolean()
+        .optional()
+        .describe('Bake values into page content and drop the AcroForm so fields are no longer editable'),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
   async ({ pdf_path, fields, output_path, flatten }) => {
     try {
@@ -95,12 +105,16 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   'pdf_merge',
-  'Merge two or more PDFs into one, in the order given, and save or return the result.',
   {
-    pdf_paths: z.array(z.string()).min(2).describe(`In order, each a ${SOURCE_DOC}`),
-    output_path: z.string().optional().describe(OUTPUT_DOC),
+    title: 'Merge PDFs',
+    description: 'Merge two or more PDFs into one, in the order given, and save or return the result.',
+    inputSchema: {
+      pdf_paths: z.array(z.string()).min(2).describe(`In order, each a ${SOURCE_DOC}`),
+      output_path: z.string().optional().describe(OUTPUT_DOC),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
   async ({ pdf_paths, output_path }) => {
     try {
@@ -113,42 +127,46 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   'pdf_invoice',
-  'Generate a complete, professionally laid-out invoice PDF from structured data — no template needed. Deterministic: the same input produces byte-identical output (safe to re-run). Note: without a paid PDFops key the output carries a small "Generated with pdfops.dev" footer line.',
   {
-    invoice: z
-      .object({
-        from: z.union([
-          z.string(),
-          z.object({ name: z.string(), lines: z.array(z.string()).optional() }),
-        ]),
-        to: z.union([
-          z.string(),
-          z.object({ name: z.string(), lines: z.array(z.string()).optional() }),
-        ]),
-        items: z
-          .array(
-            z.object({
-              description: z.string(),
-              quantity: z.number().positive().optional(),
-              unit_price: z.number().nonnegative(),
-            }),
-          )
-          .min(1)
-          .max(100),
-        invoice_number: z.string().optional(),
-        date: z
-          .string()
-          .optional()
-          .describe('Shown on the invoice; also pins metadata for determinism'),
-        due: z.string().optional(),
-        currency: z.string().regex(/^[A-Z]{3}$/).optional(),
-        tax_rate: z.number().min(0).max(100).optional(),
-        notes: z.string().max(1000).optional(),
-      })
-      .describe('Invoice data'),
-    output_path: z.string().optional().describe(OUTPUT_DOC),
+    title: 'Generate invoice PDF',
+    description: 'Generate a complete, professionally laid-out invoice PDF from structured data — no template needed. Deterministic: the same input produces byte-identical output (safe to re-run). Note: without a paid PDFops key the output carries a small "Generated with pdfops.dev" footer line.',
+    inputSchema: {
+      invoice: z
+        .object({
+          from: z.union([
+            z.string(),
+            z.object({ name: z.string(), lines: z.array(z.string()).optional() }),
+          ]),
+          to: z.union([
+            z.string(),
+            z.object({ name: z.string(), lines: z.array(z.string()).optional() }),
+          ]),
+          items: z
+            .array(
+              z.object({
+                description: z.string(),
+                quantity: z.number().positive().optional(),
+                unit_price: z.number().nonnegative(),
+              }),
+            )
+            .min(1)
+            .max(100),
+          invoice_number: z.string().optional(),
+          date: z
+            .string()
+            .optional()
+            .describe('Shown on the invoice; also pins metadata for determinism'),
+          due: z.string().optional(),
+          currency: z.string().regex(/^[A-Z]{3}$/).optional(),
+          tax_rate: z.number().min(0).max(100).optional(),
+          notes: z.string().max(1000).optional(),
+        })
+        .describe('Invoice data'),
+      output_path: z.string().optional().describe(OUTPUT_DOC),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
   async ({ invoice, output_path }) => {
     try {
@@ -161,10 +179,14 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   'pdfops_usage',
-  'Check the current PDFops API quota for the configured key: tier, limit, used, remaining, reset date. Requires PDFOPS_API_KEY.',
-  {},
+  {
+    title: 'Check PDFops quota',
+    description: 'Check the current PDFops API quota for the configured key: tier, limit, used, remaining, reset date. Requires PDFOPS_API_KEY.',
+    inputSchema: {},
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
   async () => {
     try {
       const usage = await client.usage();

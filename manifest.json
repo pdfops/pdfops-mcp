@@ -1,0 +1,47 @@
+{
+  "manifest_version": "0.3",
+  "name": "pdfops-mcp",
+  "display_name": "PDFops — fill, merge, inspect, invoice PDFs",
+  "version": "0.3.1",
+  "description": "Deterministic PDF tools for agents: inspect AcroForm fields, fill forms, merge PDFs, generate invoices.",
+  "long_description": "Gives Claude local PDF tools backed by the PDFops API (https://pdfops.dev): list a PDF's form fields with a paste-ready fill template, fill AcroForm fields (optionally flattening), merge PDFs in order, and generate deterministic invoice PDFs from structured data. Inputs are file paths, https URLs or data URIs; outputs are written to a path or returned inline. Works keyless (100 requests/IP/month) or with a free API key (250/month, no card).",
+  "author": { "name": "PDFops", "email": "hello@pdfops.dev", "url": "https://pdfops.dev" },
+  "repository": { "type": "git", "url": "https://github.com/pdfops/pdfops-mcp.git" },
+  "homepage": "https://pdfops.dev",
+  "documentation": "https://pdfops.dev/docs",
+  "support": "https://github.com/pdfops/pdfops-mcp/issues",
+  "icon": "icon.png",
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": { "PDFOPS_API_KEY": "${user_config.api_key}" }
+    }
+  },
+  "tools": [
+    { "name": "pdf_inspect", "description": "List a PDF's AcroForm fields plus a paste-ready fill template" },
+    { "name": "pdf_fill", "description": "Fill AcroForm fields; optionally flatten; write a file or return the PDF inline" },
+    { "name": "pdf_merge", "description": "Merge two or more PDFs in order" },
+    { "name": "pdf_invoice", "description": "Generate a deterministic invoice PDF from structured data" },
+    { "name": "pdfops_usage", "description": "Check the quota of the configured API key" }
+  ],
+  "keywords": ["pdf", "acroform", "fill-pdf", "merge-pdf", "invoice", "forms"],
+  "license": "MIT",
+  "privacy_policies": ["https://pdfops.dev/privacy"],
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": { "node": ">=18.0.0" }
+  },
+  "user_config": {
+    "api_key": {
+      "type": "string",
+      "title": "PDFops API key (optional)",
+      "description": "Free key from https://pdfops.dev/pricing (250 requests/month, no card). Leave empty for the keyless trial (100 requests/IP/month).",
+      "sensitive": true,
+      "required": false
+    }
+  }
+}
