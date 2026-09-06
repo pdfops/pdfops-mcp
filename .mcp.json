@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "pdfops": {
+      "command": "npx",
+      "args": ["-y", "pdfops-mcp"],
+      "env": { "PDFOPS_API_KEY": "" }
+    }
+  }
+}
