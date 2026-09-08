@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "pdfops-mcp",
   "display_name": "PDFops — fill, merge, inspect, invoice PDFs",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Deterministic PDF tools for agents: inspect AcroForm fields, fill forms, merge PDFs, generate invoices.",
   "long_description": "Gives Claude local PDF tools backed by the PDFops API (https://pdfops.dev): list a PDF's form fields with a paste-ready fill template, fill AcroForm fields (optionally flattening), merge PDFs in order, and generate deterministic invoice PDFs from structured data. Inputs are file paths, https URLs or data URIs; outputs are written to a path or returned inline. Works keyless (100 requests/IP/month) or with a free API key (250/month, no card).",
   "author": { "name": "PDFops", "email": "hello@pdfops.dev", "url": "https://github.com/pdfops" },
