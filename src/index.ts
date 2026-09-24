@@ -29,13 +29,25 @@ import { describeSource, pdfResult, resolveSource } from './source.js';
 // longer drift from the published one (0.2.0 shipped reporting 0.1.1).
 const { version } = createRequire(import.meta.url)('../package.json') as { version: string };
 
+const server = new McpServer({ name: 'pdfops', version });
+
+// Source attribution: every API call carries this server's version and the
+// MCP host app ("claude-ai/0.1.0", "cursor-vscode/1.0.0", …) taken from the
+// initialize handshake's clientInfo. Added via a fetch wrapper rather than
+// SDK options because clientInfo only exists after connect, and so this works
+// against the already-published pdfops-sdk 0.4.0.
 const client = new PdfOps({
   apiKey: process.env.PDFOPS_API_KEY,
   baseUrl: process.env.PDFOPS_BASE_URL,
   clientTag: 'mcp',
+  fetch: (input, init) => {
+    const headers = new Headers(init?.headers);
+    headers.set('X-Pdfops-Client-Version', version);
+    const host = server.server.getClientVersion();
+    if (host) headers.set('X-Pdfops-Client-Host', `${host.name}/${host.version}`);
+    return fetch(input, { ...init, headers });
+  },
 });
-
-const server = new McpServer({ name: 'pdfops', version });
 
 const SOURCE_DOC =
   'PDF source: an absolute file path, an https:// URL, or a data:application/pdf;base64,… URI. Use a URL or data URI when this server runs remotely (Smithery, hosted gateways) where local paths do not exist.';

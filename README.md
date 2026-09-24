@@ -10,6 +10,8 @@ Beside a local agent, tools operate on file paths, so PDF bytes never transit th
 
 ```bash
 claude mcp add pdfops -- npx -y pdfops-mcp
+# with a key:
+claude mcp add pdfops -e PDFOPS_API_KEY=pdfops_live_… -- npx -y pdfops-mcp
 ```
 
 **Claude Desktop** (`claude_desktop_config.json`) / **Cursor** (`.cursor/mcp.json`)
@@ -25,6 +27,23 @@ claude mcp add pdfops -- npx -y pdfops-mcp
   }
 }
 ```
+
+**VS Code** (`.vscode/mcp.json`, note the `servers` key and `type`)
+
+```json
+{
+  "servers": {
+    "pdfops": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "pdfops-mcp"],
+      "env": { "PDFOPS_API_KEY": "pdfops_live_…" }
+    }
+  }
+}
+```
+
+Any other stdio client (Windsurf, Cline, Zed, your own agent): command `npx`, args `-y pdfops-mcp`. Per-client walkthrough and a real tool-call transcript: [pdfops.dev/mcp](https://pdfops.dev/mcp).
 
 `PDFOPS_API_KEY` is optional — without it you get the keyless trial (100 requests/IP/month). A free key (250/month, no card) takes one field at [pdfops.dev/pricing](https://pdfops.dev/pricing).
 
@@ -46,6 +65,15 @@ A hosted MCP runtime executes this server on a machine where your agent's file p
 - **Outputs**: omit `output_path` and `pdf_fill` / `pdf_merge` / `pdf_invoice` return the PDF inline as an embedded `application/pdf` resource (`pdfops://filled.pdf`, …) that the client saves. With `output_path` set, the file is written where the *server* runs.
 
 Locally, absolute paths keep working exactly as before and remain the recommended form — bytes stay off the model context.
+
+## Example prompts
+
+- *"What fields does ~/forms/fw9.pdf have?"* → `pdf_inspect`
+- *"Fill ~/forms/fw9.pdf for Ada Lovelace, 12 Analytical Way, London; save it flattened as ~/out/w9-ada.pdf"* → `pdf_inspect`, then `pdf_fill` with `flatten: true`
+- *"Fill the onboarding form once per row of contractors.csv into ~/out/"* → one `pdf_inspect`, then `pdf_fill` per row
+- *"Merge ~/out/w9-ada.pdf, ~/docs/nda.pdf and ~/docs/cover.pdf into one packet, cover first"* → `pdf_merge`
+- *"Invoice Globex for 3 days of consulting at $650, 8.5% tax, due in 30 days"* → `pdf_invoice`
+- *"How many PDFops requests do I have left this month?"* → `pdfops_usage`
 
 ## Example agent flow
 
