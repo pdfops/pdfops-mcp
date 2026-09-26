@@ -61,7 +61,7 @@ Any other stdio client (Windsurf, Cline, Zed, your own agent): command `npx`, ar
 
 A hosted MCP runtime executes this server on a machine where your agent's file paths do not exist. Nothing changes in the config — pass sources the server can reach and skip `output_path`:
 
-- **Inputs** (`pdf_path`, `pdf_paths`): an `https://` URL the server can fetch (≤50 MB), or a `data:application/pdf;base64,…` URI for small files.
+- **Inputs** (`pdf_path`, `pdf_paths`): an `https://` URL the server can fetch (≤4 MB per PDF, ≤4.5 MB per request — the API's limits), or a `data:application/pdf;base64,…` URI for small files.
 - **Outputs**: omit `output_path` and `pdf_fill` / `pdf_merge` / `pdf_invoice` return the PDF inline as an embedded `application/pdf` resource (`pdfops://filled.pdf`, …) that the client saves. With `output_path` set, the file is written where the *server* runs.
 
 Locally, absolute paths keep working exactly as before and remain the recommended form — bytes stay off the model context.

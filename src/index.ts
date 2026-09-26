@@ -95,11 +95,12 @@ server.registerTool(
     outputSchema: {
       count: z.number().int().describe('Number of form fields found; 0 when the PDF has no fillable form'),
       hasXFA: z.boolean().describe('True for hybrid AcroForm/XFA documents, whose XFA layer is dropped when filled'),
+      truncated: z.boolean().describe('True when the form exceeded an API enumeration cap; fields is then a prefix, not the full list'),
       fields: z
         .array(
           z.object({
             name: z.string(),
-            type: z.string().describe('text, checkbox, radio, optionlist, or unsupported'),
+            type: z.string().describe('text, checkbox, dropdown, radio, optionlist, or unsupported'),
             readOnly: z.boolean(),
             value: z.string().optional(),
             options: z.array(z.string()).optional().describe('Permitted values for radio/dropdown/optionlist fields'),
@@ -204,8 +205,9 @@ server.registerTool(
           invoice_number: z.string().optional(),
           date: z
             .string()
+            .regex(/^\d{4}-\d{2}-\d{2}$/)
             .optional()
-            .describe('Shown on the invoice; also pins metadata for determinism'),
+            .describe('Calendar date in YYYY-MM-DD form (other formats are rejected with invalid_date). Shown on the invoice; also pins metadata for determinism'),
           due: z.string().optional(),
           currency: z.string().regex(/^[A-Z]{3}$/).optional(),
           tax_rate: z.number().min(0).max(100).optional(),

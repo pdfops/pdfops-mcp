@@ -16,8 +16,8 @@
 
 import { readFile } from 'node:fs/promises';
 
-/** Upper bound on a fetched or inline PDF. The API rejects larger bodies anyway. */
-export const MAX_INPUT_BYTES = 50 * 1024 * 1024;
+/** Upper bound on a fetched PDF: the API's per-PDF cap, so oversize fails here with a clear message. */
+export const MAX_INPUT_BYTES = 4 * 1024 * 1024;
 
 export type SourceKind = 'path' | 'url' | 'data';
 
