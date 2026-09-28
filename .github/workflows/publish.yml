@@ -47,6 +47,9 @@ jobs:
           PKG=$(node -p "require('./package.json').version")
           echo "tag=$TAG package.json=$PKG"
           [ "$TAG" = "$PKG" ] || { echo "tag $TAG != package.json $PKG"; exit 1; }
+          # server.json feeds the MCP registry step below; it must agree too.
+          SRVJ=$(node -p "const s=require('./server.json'); s.version+' '+s.packages[0].version")
+          [ "$SRVJ" = "$TAG $TAG" ] || { echo "server.json versions ($SRVJ) != tag $TAG"; exit 1; }
 
       - run: npm ci
 
@@ -65,3 +68,28 @@ jobs:
 
       - name: Publish to npm
         run: npm publish
+
+      # The official MCP registry (registry.modelcontextprotocol.io) lagged npm
+      # whenever this was a manual step. Namespace dev.pdfops/* uses HTTP domain
+      # auth: the public key is served at pdfops.dev/.well-known/mcp-registry-auth,
+      # the private key is the MCP_REGISTRY_ED25519_PRIVATE_KEY_HEX secret.
+      # Binary pinned to v1.8.1 and checked against the release's checksums file.
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL -o mcp-publisher.tar.gz \
+            https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz
+          echo "a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+
+      - name: Publish to the MCP registry
+        env:
+          MCP_KEY: ${{ secrets.MCP_REGISTRY_ED25519_PRIVATE_KEY_HEX }}
+        run: |
+          ./mcp-publisher login http -domain pdfops.dev -private-key "$MCP_KEY"
+          # The registry verifies the npm package's mcpName, so retry briefly
+          # while the just-published version propagates.
+          for i in 1 2 3 4 5; do
+            ./mcp-publisher publish && exit 0
+            echo "attempt $i failed; retrying in 20s"; sleep 20
+          done
+          exit 1
