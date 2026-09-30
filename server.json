@@ -6,16 +6,30 @@
     "url": "https://github.com/pdfops/pdfops-mcp",
     "source": "github"
   },
-  "version": "0.3.5",
+  "version": "0.3.6",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "pdfops-mcp",
-      "version": "0.3.5",
+      "version": "0.3.6",
       "transport": {
         "type": "stdio"
       }
     }
   ],
-  "websiteUrl": "https://pdfops.dev"
+  "websiteUrl": "https://pdfops.dev",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://pdfops.dev/api/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Bearer <PDFOPS_API_KEY>. Free key at https://pdfops.dev/pricing#free-key",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
 }

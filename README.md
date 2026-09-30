@@ -57,6 +57,16 @@ Any other stdio client (Windsurf, Cline, Zed, your own agent): command `npx`, ar
 | `pdf_invoice` | Structured data → complete invoice PDF. Deterministic: same input, byte-identical output. |
 | `pdfops_usage` | Quota check for the configured key. |
 
+## Hosted endpoint (no install)
+
+PDFops also runs this server for you at `https://pdfops.dev/api/mcp` (Streamable HTTP). It needs an API key, which is free at <https://pdfops.dev/pricing#free-key>:
+
+```bash
+claude mcp add --transport http pdfops https://pdfops.dev/api/mcp --header "Authorization: Bearer $PDFOPS_API_KEY"
+```
+
+Sources must be `https://` URLs or `data:` URIs, and results come back inline. Setup for Cursor and VS Code: <https://pdfops.dev/mcp#remote>.
+
 ## Running remotely (Smithery, Glama hosted, cloud IDE gateways)
 
 A hosted MCP runtime executes this server on a machine where your agent's file paths do not exist. Nothing changes in the config — pass sources the server can reach and skip `output_path`:
