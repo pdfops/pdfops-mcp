@@ -67,7 +67,15 @@ jobs:
           [ "$PKG" = "$SRV" ] || { echo "version drift: package.json $PKG != serverInfo $SRV"; exit 1; }
 
       - name: Publish to npm
-        run: npm publish
+        # Skipped when the version is already on npm, so a re-run of this job
+        # (e.g. after a registry-step failure) doesn't die on npm's 403.
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          if npm view "pdfops-mcp@$VER" version >/dev/null 2>&1; then
+            echo "pdfops-mcp@$VER already on npm; skipping"
+          else
+            npm publish
+          fi
 
       # The official MCP registry (registry.modelcontextprotocol.io) lagged npm
       # whenever this was a manual step. Namespace dev.pdfops/* uses HTTP domain
@@ -86,10 +94,15 @@ jobs:
           MCP_KEY: ${{ secrets.MCP_REGISTRY_ED25519_PRIVATE_KEY_HEX }}
         run: |
           ./mcp-publisher login http -domain pdfops.dev -private-key "$MCP_KEY"
-          # The registry verifies the npm package's mcpName, so retry briefly
-          # while the just-published version propagates.
+          # The registry checks the npm version exists; npm's read side lags
+          # a publish by minutes (0.3.5: >100s). Wait for it (up to 10 min).
+          VER=$(node -p "require('./package.json').version")
+          for i in $(seq 1 40); do
+            curl -fsS "https://registry.npmjs.org/pdfops-mcp/$VER" >/dev/null 2>&1 && break
+            echo "npm not serving $VER yet ($i/40)"; sleep 15
+          done
           for i in 1 2 3 4 5; do
             ./mcp-publisher publish && exit 0
-            echo "attempt $i failed; retrying in 20s"; sleep 20
+            echo "attempt $i failed; retrying in 30s"; sleep 30
           done
           exit 1
