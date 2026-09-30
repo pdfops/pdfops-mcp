@@ -89,6 +89,6 @@ API docs: [pdfops.dev/docs](https://pdfops.dev/docs) · OpenAPI: [pdfops.dev/ope
 
 ## Privacy Policy
 
-This server runs on your machine and sends only what a tool call needs to the PDFops API (`https://pdfops.dev`): the PDF bytes you point it at, the field values you supply, and your API key if you set one. PDFops processes the request in memory and returns the result; it does not store your documents. Anonymous usage is metered per IP and per client tag (`mcp`) for quota and attribution only. Nothing is shared with third parties. The full policy, including retention and contact details, is at <https://pdfops.dev/privacy>. Questions: hello@pdfops.dev.
+This server runs on your machine and sends only what a tool call needs to the PDFops API (`https://pdfops.dev`): the PDF bytes you point it at, the field values you supply, and your API key if you set one. PDFops processes the request in memory and returns the result; it does not store your documents. API requests are logged with usage metadata to run quotas and the service. The full policy is at <https://pdfops.dev/privacy>. Questions: hello@pdfops.dev.
 
 MIT © PDFops
