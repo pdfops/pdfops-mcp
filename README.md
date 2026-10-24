@@ -59,9 +59,11 @@ Any other stdio client (Windsurf, Cline, Zed, your own agent): command `npx`, ar
 
 ## Hosted endpoint (no install)
 
-PDFops also runs this server for you at `https://pdfops.dev/api/mcp` (Streamable HTTP). It needs an API key, which is free at <https://pdfops.dev/pricing#free-key>:
+PDFops also runs this server for you at `https://pdfops.dev/api/mcp` (Streamable HTTP). It works without a key (keyless trial cap of 100 calls/IP/month); a free key from <https://pdfops.dev/pricing#free-key> raises the cap:
 
 ```bash
+claude mcp add --transport http pdfops https://pdfops.dev/api/mcp
+# with a key:
 claude mcp add --transport http pdfops https://pdfops.dev/api/mcp --header "Authorization: Bearer $PDFOPS_API_KEY"
 ```
 
