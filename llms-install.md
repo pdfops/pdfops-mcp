@@ -34,6 +34,16 @@ Call `pdfops_usage` (if a key is set) or `pdf_inspect` with any PDF path. A succ
 - `pdf_fill` — fill fields, optionally flatten; writes a file or returns the PDF inline
 - `pdf_merge` — merge two or more PDFs in order
 - `pdf_invoice` — generate a deterministic invoice PDF from structured data
+- `pdf_extract_pages` — keep only the listed pages, in the order given
+- `pdf_delete_pages` — remove the listed pages
+- `pdf_rotate` — rotate pages clockwise by 90, 180, 270 or -90 degrees
+- `pdf_split` — split a PDF into several PDFs by ranges or chunk size; writes to `output_dir` or returns each part inline
+- `pdf_watermark` — stamp a diagonal text watermark
+- `pdf_page_numbers` — print page numbers from a `{n}` / `{total}` template
+- `pdf_unlock` — save without encryption (does not crack unknown passwords)
+- `pdf_protect` — encrypt with user/owner passwords and permissions
+- `pdf_metadata` — read page count, page sizes and document info
+- `pdf_set_metadata` — write title, author, subject, creator, keywords
 - `pdfops_usage` — quota for the configured key
 
-Inputs accept absolute file paths, `https://` URLs, or `data:application/pdf;base64,…` URIs. Omit `output_path` to receive the PDF inline as an `application/pdf` resource.
+Inputs accept absolute file paths, `https://` URLs, or `data:application/pdf;base64,…` URIs. Omit `output_path` (`output_dir` for `pdf_split`) to receive the PDF inline as an `application/pdf` resource.

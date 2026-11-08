@@ -1,6 +1,6 @@
 # pdfops-mcp
 
-MCP server that gives AI agents deterministic PDF tools, backed by the [PDFops API](https://pdfops.dev): **inspect** AcroForm fields, **fill** forms, **merge** PDFs, and **generate invoices** — no Chromium, no native deps, nothing to host.
+MCP server that gives AI agents deterministic PDF tools, backed by the [PDFops API](https://pdfops.dev): **inspect** AcroForm fields, **fill** forms, **merge** PDFs, **generate invoices**, and **edit** PDFs (extract, delete, rotate and split pages, watermark, page numbers, unlock, protect, metadata) — no Chromium, no native deps, nothing to host.
 
 Beside a local agent, tools operate on file paths, so PDF bytes never transit the model context: your agent says *"fill /tmp/form.pdf and save to /tmp/out.pdf"* and gets a one-line confirmation back. Every PDF input also accepts an `https://` URL or a `data:application/pdf;base64,…` URI, and every output can be returned inline instead of written — which is what makes the server work on hosted runtimes (see below).
 
@@ -55,6 +55,16 @@ Any other stdio client (Windsurf, Cline, Zed, your own agent): command `npx`, ar
 | `pdf_fill` | Fill AcroForm fields → write the filled PDF. Optional `flatten` bakes values in and drops the form. |
 | `pdf_merge` | Merge ≥2 PDFs in order → write the result. |
 | `pdf_invoice` | Structured data → complete invoice PDF. Deterministic: same input, byte-identical output. |
+| `pdf_extract_pages` | Keep only the listed pages, in the order given (also reorders and duplicates) → write the result. |
+| `pdf_delete_pages` | Remove the listed pages, keep the rest in order → write the result. |
+| `pdf_rotate` | Rotate pages clockwise by 90, 180, 270 or -90 degrees; all pages unless `pages` is given. |
+| `pdf_split` | Split into several PDFs by `ranges` or fixed-size `every` chunks → `part-1.pdf`, `part-2.pdf`, … in `output_dir`, or inline. |
+| `pdf_watermark` | Stamp a diagonal text watermark (opacity, size, colour, position, page selection). |
+| `pdf_page_numbers` | Print page numbers from a `{n}` / `{total}` template, with position, start number and margin. |
+| `pdf_unlock` | Save without encryption so print/copy restrictions are gone. Does not crack unknown passwords. |
+| `pdf_protect` | Encrypt with a user and/or owner password and a list of allowed permissions. |
+| `pdf_metadata` | Read page count, per-page sizes and rotation, title/author/dates, encryption flag and form field count. |
+| `pdf_set_metadata` | Write title, author, subject, creator and keywords. |
 | `pdfops_usage` | Quota check for the configured key. |
 
 ## Hosted endpoint (no install)
@@ -74,7 +84,7 @@ Sources must be `https://` URLs or `data:` URIs, and results come back inline. S
 A hosted MCP runtime executes this server on a machine where your agent's file paths do not exist. Nothing changes in the config — pass sources the server can reach and skip `output_path`:
 
 - **Inputs** (`pdf_path`, `pdf_paths`): an `https://` URL the server can fetch (≤4 MB per PDF, ≤4.5 MB per request — the API's limits), or a `data:application/pdf;base64,…` URI for small files.
-- **Outputs**: omit `output_path` and `pdf_fill` / `pdf_merge` / `pdf_invoice` return the PDF inline as an embedded `application/pdf` resource (`pdfops://filled.pdf`, …) that the client saves. With `output_path` set, the file is written where the *server* runs.
+- **Outputs**: omit `output_path` and the PDF-producing tools (`pdf_fill`, `pdf_merge`, `pdf_invoice`, `pdf_rotate`, …) return the PDF inline as an embedded `application/pdf` resource (`pdfops://filled.pdf`, …) that the client saves. With `output_path` set, the file is written where the *server* runs.
 
 Locally, absolute paths keep working exactly as before and remain the recommended form — bytes stay off the model context.
 
@@ -85,6 +95,8 @@ Locally, absolute paths keep working exactly as before and remain the recommende
 - *"Fill the onboarding form once per row of contractors.csv into ~/out/"* → one `pdf_inspect`, then `pdf_fill` per row
 - *"Merge ~/out/w9-ada.pdf, ~/docs/nda.pdf and ~/docs/cover.pdf into one packet, cover first"* → `pdf_merge`
 - *"Invoice Globex for 3 days of consulting at $650, 8.5% tax, due in 30 days"* → `pdf_invoice`
+- *"Drop pages 1-2 of ~/docs/scan.pdf and rotate the rest 90 degrees"* → `pdf_delete_pages`, then `pdf_rotate`
+- *"Split ~/docs/report.pdf into 10-page chunks in ~/out/"* → `pdf_split` with `every: 10`, `output_dir`
 - *"How many PDFops requests do I have left this month?"* → `pdfops_usage`
 
 ## Example agent flow
