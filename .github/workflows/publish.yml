@@ -16,6 +16,10 @@ name: Publish
 on:
   push:
     tags: ['v*']
+  # Manual re-run for the registry step after a failure that the npm publish
+  # survived (0.4.0: npm succeeded, the registry rejected a 124-char description).
+  # The npm step skips when the version is already published.
+  workflow_dispatch:
 
 permissions:
   id-token: write   # required for OIDC
@@ -43,13 +47,19 @@ jobs:
         # already got bitten by (serverInfo reported 0.1.1 in a 0.2.0 release).
         # Fail before anything reaches the registry, where it is immutable.
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
           PKG=$(node -p "require('./package.json').version")
+          case "$GITHUB_REF" in
+            refs/tags/*) TAG="${GITHUB_REF_NAME#v}" ;;
+            *) TAG="$PKG"; echo "manual run: using package.json version $PKG" ;;
+          esac
           echo "tag=$TAG package.json=$PKG"
           [ "$TAG" = "$PKG" ] || { echo "tag $TAG != package.json $PKG"; exit 1; }
           # server.json feeds the MCP registry step below; it must agree too.
           SRVJ=$(node -p "const s=require('./server.json'); s.version+' '+s.packages[0].version")
           [ "$SRVJ" = "$TAG $TAG" ] || { echo "server.json versions ($SRVJ) != tag $TAG"; exit 1; }
+          # The registry caps the server description at 100 characters (422 otherwise).
+          DLEN=$(node -p "require('./server.json').description.length")
+          [ "$DLEN" -le 100 ] || { echo "server.json description is $DLEN chars; the MCP registry allows 100"; exit 1; }
 
       - run: npm ci
 
