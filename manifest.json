@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "pdfops-mcp",
   "display_name": "PDFops — fill, merge, split, edit, invoice PDFs",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Deterministic PDF tools for agents: inspect AcroForm fields, fill forms, merge PDFs, generate invoices, edit pages, watermark, protect and read or set metadata.",
   "long_description": "Gives Claude local PDF tools backed by the PDFops API (https://pdfops.dev): list a PDF's form fields with a paste-ready fill template, fill AcroForm fields (optionally flattening), merge PDFs in order, generate deterministic invoice PDFs from structured data, and edit PDFs: extract, delete, rotate and split pages, add watermarks and page numbers, unlock or password-protect, and read or set document metadata. Inputs are file paths, https URLs or data URIs; outputs are written to a path or returned inline. Works keyless (100 requests/IP/month) or with a free API key (250/month, no card).",
   "author": { "name": "PDFops", "email": "hello@pdfops.dev", "url": "https://github.com/pdfops" },
@@ -17,7 +17,7 @@
     "mcp_config": {
       "command": "node",
       "args": ["${__dirname}/dist/index.js"],
-      "env": { "PDFOPS_API_KEY": "${user_config.api_key}" }
+      "env": { "PDFOPS_API_KEY": "${user_config.api_key}", "PDFOPS_ROOT": "${user_config.pdfops_root}" }
     }
   },
   "tools": [
@@ -51,6 +51,13 @@
       "title": "PDFops API key (optional)",
       "description": "Free key from https://pdfops.dev/pricing (250 requests/month, no card). Leave empty for the keyless trial (100 requests/IP/month).",
       "sensitive": true,
+      "required": false
+    },
+    "pdfops_root": {
+      "type": "directory",
+      "title": "PDF folder",
+      "description": "The only folder PDFops may read PDFs from and write PDFs to (subfolders included). Defaults to your home folder.",
+      "default": "${HOME}",
       "required": false
     }
   }

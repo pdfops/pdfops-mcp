@@ -47,6 +47,8 @@ Any other stdio client (Windsurf, Cline, Zed, your own agent): command `npx`, ar
 
 `PDFOPS_API_KEY` is optional — without it you get the keyless trial (100 requests/IP/month). A free key (250/month, no card) takes one field at [pdfops.dev/pricing](https://pdfops.dev/pricing).
 
+**File access is confined.** The server reads and writes only `.pdf` files inside `PDFOPS_ROOT`, which defaults to the directory the client starts it in (your home directory if that is `/`). Set it to the folder(s) holding your PDFs, separated by `:` (`;` on Windows), e.g. `-e PDFOPS_ROOT=$HOME/Documents/forms`. Inputs must start with a `%PDF` header, symlinks are resolved before the check, and URLs must be public `https://` addresses (private, loopback and cloud-metadata hosts are refused on every redirect hop). Since 0.4.2.
+
 ## Tools
 
 | Tool | What it does |

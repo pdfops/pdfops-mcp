@@ -19,16 +19,15 @@
 //                   (250 req/mo; keyless works at 100 req/IP/mo)
 //   PDFOPS_BASE_URL optional — API origin override (testing)
 
-import { stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { isAbsolute, join } from 'node:path';
+import { join } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 // Tool annotations (title + readOnlyHint/destructiveHint) are mandatory for the
 // Claude Connectors Directory and help every client show what a tool does.
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { PdfOps, PdfOpsError } from 'pdfops-sdk';
-import { describeSource, pdfResult, resolveSource } from './source.js';
+import { checkOutputDir, checkOutputPath, describeSource, pdfResult, resolveSource, writeOutputPdf } from './source.js';
 
 // Version comes from package.json so the string MCP clients display can no
 // longer drift from the published one (0.2.0 shipped reporting 0.1.1).
@@ -54,9 +53,9 @@ const client = new PdfOps({
 });
 
 const SOURCE_DOC =
-  'PDF source: an absolute file path, an https:// URL, or a data:application/pdf;base64,… URI. Use a URL or data URI when this server runs remotely (Smithery, hosted gateways) where local paths do not exist.';
+  'PDF source: a path to a .pdf file inside the allowed directories (PDFOPS_ROOT, default the working directory), an https:// URL, or a data:application/pdf;base64,… URI. Use a URL or data URI when this server runs remotely (Smithery, hosted gateways) where local paths do not exist.';
 const OUTPUT_DOC =
-  'Absolute path to write the result. Omit when running remotely: the PDF is then returned inline as an application/pdf resource for the client to save.';
+  'Path of a .pdf file to write the result to, inside the allowed directories (PDFOPS_ROOT, default the working directory); an existing file there is overwritten. Omit when running remotely: the PDF is then returned inline as an application/pdf resource for the client to save.';
 
 const PASSWORD_DOC =
   'Password to open the input, only needed for a user-password PDF (owner-locked files with an empty user password open without it).';
@@ -83,7 +82,7 @@ const PDF_OUTPUT = {
 };
 
 const emit = async (bytes: Uint8Array, name: string, summary: string, output_path?: string) => {
-  if (output_path) await writeFile(output_path, bytes);
+  if (output_path) output_path = await writeOutputPdf(output_path, bytes);
   const base = pdfResult(bytes, name, summary, output_path);
   return {
     ...base,
@@ -152,10 +151,11 @@ server.registerTool(
       password: z.string().optional().describe(PASSWORD_DOC),
     },
     outputSchema: PDF_OUTPUT,
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
   },
   async ({ pdf_path, fields, output_path, flatten, password }) => {
     try {
+      if (output_path) await checkOutputPath(output_path);
       const bytes = await client.fillForm(await resolveSource(pdf_path), fields, { flatten, password });
       return await emit(bytes, 'filled.pdf', `Filled ${describeSource(pdf_path)}`, output_path);
     } catch (e) {
@@ -175,10 +175,11 @@ server.registerTool(
       output_path: z.string().optional().describe(OUTPUT_DOC),
     },
     outputSchema: PDF_OUTPUT,
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
   },
   async ({ pdf_paths, password, output_path }) => {
     try {
+      if (output_path) await checkOutputPath(output_path);
       const inputs = await Promise.all(pdf_paths.map((p) => resolveSource(p)));
       const bytes = await client.merge(inputs, { password });
       return await emit(bytes, 'merged.pdf', `Merged ${pdf_paths.length} PDFs`, output_path);
@@ -229,10 +230,11 @@ server.registerTool(
       output_path: z.string().optional().describe(OUTPUT_DOC),
     },
     outputSchema: PDF_OUTPUT,
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
   },
   async ({ invoice, output_path }) => {
     try {
+      if (output_path) await checkOutputPath(output_path);
       const bytes = await client.invoice(invoice);
       const name = invoice.invoice_number ? `invoice-${invoice.invoice_number}.pdf` : 'invoice.pdf';
       return await emit(bytes, name, 'Invoice', output_path);
@@ -271,7 +273,8 @@ server.registerTool(
 const PAGES_DOC = '1-based page spec such as "1-3,5"; default all pages';
 const OUT_TAIL =
   'Returns the result written to output_path, or inline as an application/pdf resource when output_path is omitted; an existing file at output_path is overwritten. The source is never modified.';
-const WRITE_ANNOTATIONS = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true };
+// destructiveHint: true because output_path / output_dir overwrite existing files (TASK-409).
+const WRITE_ANNOTATIONS = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true };
 
 server.registerTool(
   'pdf_extract_pages',
@@ -289,6 +292,7 @@ server.registerTool(
   },
   async ({ pdf_path, pages, password, output_path }) => {
     try {
+      if (output_path) await checkOutputPath(output_path);
       const bytes = await client.extractPages(await resolveSource(pdf_path), pages, { password });
       return await emit(bytes, 'extracted.pdf', 'Extracted pages', output_path);
     } catch (e) {
@@ -313,6 +317,7 @@ server.registerTool(
   },
   async ({ pdf_path, pages, password, output_path }) => {
     try {
+      if (output_path) await checkOutputPath(output_path);
       const bytes = await client.deletePages(await resolveSource(pdf_path), pages, { password });
       return await emit(bytes, 'trimmed.pdf', 'PDF with pages deleted', output_path);
     } catch (e) {
@@ -340,6 +345,7 @@ server.registerTool(
   },
   async ({ pdf_path, degrees, pages, password, output_path }) => {
     try {
+      if (output_path) await checkOutputPath(output_path);
       const bytes = await client.rotate(await resolveSource(pdf_path), degrees, { pages, password });
       return await emit(bytes, 'rotated.pdf', 'Rotated PDF', output_path);
     } catch (e) {
@@ -362,7 +368,7 @@ server.registerTool(
       output_dir: z
         .string()
         .optional()
-        .describe('Absolute path of an existing directory to write part-1.pdf, part-2.pdf, … into. Omit when running remotely: the parts are then returned inline as application/pdf resources.'),
+        .describe('Path of an existing directory inside the allowed directories (PDFOPS_ROOT, default the working directory) to write part-1.pdf, part-2.pdf, … into. Omit when running remotely: the parts are then returned inline as application/pdf resources.'),
     },
     outputSchema: {
       count: z.number().int().describe('Number of parts produced'),
@@ -380,11 +386,7 @@ server.registerTool(
   },
   async ({ pdf_path, ranges, every, password, output_dir }) => {
     try {
-      if (output_dir) {
-        if (!isAbsolute(output_dir)) throw new Error(`output_dir must be an absolute path: ${output_dir}`);
-        const st = await stat(output_dir).catch(() => undefined);
-        if (!st?.isDirectory()) throw new Error(`output_dir is not an existing directory: ${output_dir}`);
-      }
+      if (output_dir) output_dir = await checkOutputDir(output_dir);
       const input = await resolveSource(pdf_path);
       // Neither/both given is passed through so the API answers with invalid_split.
       const opts = { ranges, every, password } as { ranges: string; password?: string };
@@ -394,7 +396,7 @@ server.registerTool(
         for (const [i, p] of result.parts.entries()) {
           const output_path = join(output_dir, `part-${i + 1}.pdf`);
           try {
-            await writeFile(output_path, p.pdf);
+            await writeOutputPdf(output_path, p.pdf);
           } catch (e) {
             const done = parts.length ? parts.map((x) => x.output_path).join(', ') : 'none';
             throw new Error(`Writing ${output_path} failed (${e instanceof Error ? e.message : String(e)}). Parts written before the failure: ${done}.`);
@@ -462,6 +464,7 @@ server.registerTool(
   },
   async ({ pdf_path, text, output_path, ...opts }) => {
     try {
+      if (output_path) await checkOutputPath(output_path);
       const bytes = await client.watermark(await resolveSource(pdf_path), text, opts);
       return await emit(bytes, 'watermarked.pdf', 'Watermarked PDF', output_path);
     } catch (e) {
@@ -494,6 +497,7 @@ server.registerTool(
   },
   async ({ pdf_path, output_path, ...opts }) => {
     try {
+      if (output_path) await checkOutputPath(output_path);
       const bytes = await client.pageNumbers(await resolveSource(pdf_path), opts);
       return await emit(bytes, 'numbered.pdf', 'Numbered PDF', output_path);
     } catch (e) {
@@ -520,6 +524,7 @@ server.registerTool(
   },
   async ({ pdf_path, password, output_path }) => {
     try {
+      if (output_path) await checkOutputPath(output_path);
       const { pdf: bytes, note } = await client.unlock(await resolveSource(pdf_path), password);
       const out = await emit(bytes, 'unlocked.pdf', 'Unlocked PDF', output_path);
       return note ? { ...out, structuredContent: { ...out.structuredContent, note } } : out;
@@ -550,6 +555,7 @@ server.registerTool(
   },
   async ({ pdf_path, user_password, owner_password, permissions, password, output_path }) => {
     try {
+      if (output_path) await checkOutputPath(output_path);
       const bytes = await client.protect(await resolveSource(pdf_path), {
         userPassword: user_password,
         ownerPassword: owner_password,
@@ -623,6 +629,7 @@ server.registerTool(
   },
   async ({ pdf_path, output_path, keywords, ...opts }) => {
     try {
+      if (output_path) await checkOutputPath(output_path);
       const list = typeof keywords === 'string' ? keywords.split(',').map((k) => k.trim()).filter(Boolean) : keywords;
       const bytes = await client.setMetadata(await resolveSource(pdf_path), { ...opts, keywords: list });
       return await emit(bytes, 'retitled.pdf', 'PDF with updated metadata', output_path);
