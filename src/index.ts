@@ -119,7 +119,7 @@ server.registerTool(
           }),
         )
         .describe('One entry per form field, in document order'),
-      fillTemplate: z.record(z.string()).describe('Field name to empty-or-current value, ready to edit and pass to pdf_fill'),
+      fillTemplate: z.object({}).catchall(z.string()).describe('Field name to empty-or-current value, ready to edit and pass to pdf_fill'),
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
@@ -141,7 +141,8 @@ server.registerTool(
     inputSchema: {
       pdf_path: z.string().describe(`Template ${SOURCE_DOC}`),
       fields: z
-        .record(z.string())
+        .object({})
+        .catchall(z.string())
         .describe('Field name → string value (from pdf_inspect\'s fillTemplate)'),
       output_path: z.string().optional().describe(OUTPUT_DOC),
       flatten: z
@@ -596,7 +597,7 @@ server.registerTool(
         form_field_count: z.number().int(),
         form_field_count_capped: z.boolean().optional().describe('True when the form-field count stopped at the 2,000 cap, so the real number may be higher'),
       })
-      .passthrough(),
+      .loose(),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
   async ({ pdf_path, password }) => {
