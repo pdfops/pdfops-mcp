@@ -58,6 +58,9 @@ const SOURCE_DOC =
 const OUTPUT_DOC =
   'Absolute path to write the result. Omit when running remotely: the PDF is then returned inline as an application/pdf resource for the client to save.';
 
+const PASSWORD_DOC =
+  'Password to open the input, only needed for a user-password PDF (owner-locked files with an empty user password open without it).';
+
 const errText = (e: unknown): string =>
   e instanceof PdfOpsError
     ? `PDFops API error ${e.status} (${e.code}): ${e.message}` +
@@ -95,7 +98,10 @@ server.registerTool(
   {
     title: 'Inspect PDF form fields',
     description: 'List a PDF\'s AcroForm form fields — names, types, options, current values, per-field maxLength where declared — plus a paste-ready fillTemplate object for pdf_fill and a hasXFA flag (hybrid AcroForm/XFA inputs lose their XFA layer when filled). A PDF with no fillable form returns count 0. Read-only: the PDF is fetched or read but never modified. Call this FIRST when filling an unfamiliar PDF, since pdf_fill rejects unknown field names and over-length values.',
-    inputSchema: { pdf_path: z.string().describe(SOURCE_DOC) },
+    inputSchema: {
+      pdf_path: z.string().describe(SOURCE_DOC),
+      password: z.string().optional().describe(PASSWORD_DOC),
+    },
     outputSchema: {
       count: z.number().int().describe('Number of form fields found; 0 when the PDF has no fillable form'),
       hasXFA: z.boolean().describe('True for hybrid AcroForm/XFA documents, whose XFA layer is dropped when filled'),
@@ -118,9 +124,9 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
-  async ({ pdf_path }) => {
+  async ({ pdf_path, password }) => {
     try {
-      const result = await client.inspect(await resolveSource(pdf_path));
+      const result = await client.inspect(await resolveSource(pdf_path), { password });
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], structuredContent: { ...result } };
     } catch (e) {
       return fail(e);
@@ -132,7 +138,7 @@ server.registerTool(
   'pdf_fill',
   {
     title: 'Fill PDF form',
-    description: 'Fill AcroForm form fields in a PDF and save or return the result. Field names must exist in the PDF (use pdf_inspect first). All values are strings; checkboxes take "true"/"false"; dropdown/radio/optionlist values must be one of the field\'s options; text values must respect the field\'s maxLength from pdf_inspect. The source PDF is never modified. Returns the filled PDF written to output_path, or inline as an application/pdf resource when output_path is omitted; an existing file at output_path is overwritten. Encrypted PDFs are rejected with decrypt advice (common for government blanks with an empty user password), and a rejected fill writes no file at all.',
+    description: 'Fill AcroForm form fields in a PDF and save or return the result. Field names must exist in the PDF (use pdf_inspect first). All values are strings; checkboxes take "true"/"false"; dropdown/radio/optionlist values must be one of the field\'s options; text values must respect the field\'s maxLength from pdf_inspect. The source PDF is never modified. Returns the filled PDF written to output_path, or inline as an application/pdf resource when output_path is omitted; an existing file at output_path is overwritten. Owner-locked PDFs (empty user password, common for government blanks) fill without a password; a user-password PDF needs the password parameter, otherwise it is rejected with encrypted_pdf. A rejected fill writes no file at all.',
     inputSchema: {
       pdf_path: z.string().describe(`Template ${SOURCE_DOC}`),
       fields: z
@@ -143,13 +149,14 @@ server.registerTool(
         .boolean()
         .optional()
         .describe('Bake values into page content and drop the AcroForm so fields are no longer editable'),
+      password: z.string().optional().describe(PASSWORD_DOC),
     },
     outputSchema: PDF_OUTPUT,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
-  async ({ pdf_path, fields, output_path, flatten }) => {
+  async ({ pdf_path, fields, output_path, flatten, password }) => {
     try {
-      const bytes = await client.fillForm(await resolveSource(pdf_path), fields, { flatten });
+      const bytes = await client.fillForm(await resolveSource(pdf_path), fields, { flatten, password });
       return await emit(bytes, 'filled.pdf', `Filled ${describeSource(pdf_path)}`, output_path);
     } catch (e) {
       return fail(e);
@@ -164,15 +171,16 @@ server.registerTool(
     description: 'Merge two or more PDFs into one, in the order given, and save or return the result. Source files are read only and never modified; an existing file at output_path is overwritten. Returns the merged PDF written to output_path, or inline as an application/pdf resource when output_path is omitted. This tool only concatenates whole documents: it does not reorder, rotate or delete pages within them, and it does not fill forms — use pdf_fill for a fillable form and pdf_invoice to build a document from data. An unreadable or rejected input fails with an error and writes no file, so a partial merge is never left behind.',
     inputSchema: {
       pdf_paths: z.array(z.string()).min(2).describe(`In order, each a ${SOURCE_DOC}`),
+      password: z.string().optional().describe(`${PASSWORD_DOC} Applies to every input.`),
       output_path: z.string().optional().describe(OUTPUT_DOC),
     },
     outputSchema: PDF_OUTPUT,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
-  async ({ pdf_paths, output_path }) => {
+  async ({ pdf_paths, password, output_path }) => {
     try {
       const inputs = await Promise.all(pdf_paths.map((p) => resolveSource(p)));
-      const bytes = await client.merge(inputs);
+      const bytes = await client.merge(inputs, { password });
       return await emit(bytes, 'merged.pdf', `Merged ${pdf_paths.length} PDFs`, output_path);
     } catch (e) {
       return fail(e);
@@ -260,8 +268,6 @@ server.registerTool(
   },
 );
 
-const PASSWORD_DOC =
-  'Password to open the input, only needed for a user-password PDF (owner-locked files with an empty user password open without it).';
 const PAGES_DOC = '1-based page spec such as "1-3,5"; default all pages';
 const OUT_TAIL =
   'Returns the result written to output_path, or inline as an application/pdf resource when output_path is omitted; an existing file at output_path is overwritten. The source is never modified.';

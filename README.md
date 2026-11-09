@@ -52,7 +52,7 @@ Any other stdio client (Windsurf, Cline, Zed, your own agent): command `npx`, ar
 | Tool | What it does |
 |---|---|
 | `pdf_inspect` | List a PDF's form fields (names, types, options, values) + a paste-ready fill template. Call first on unfamiliar PDFs. |
-| `pdf_fill` | Fill AcroForm fields → write the filled PDF. Optional `flatten` bakes values in and drops the form. |
+| `pdf_fill` | Fill AcroForm fields → write the filled PDF. Optional `flatten` bakes values in and drops the form; optional `password` opens a user-password PDF. |
 | `pdf_merge` | Merge ≥2 PDFs in order → write the result. |
 | `pdf_invoice` | Structured data → complete invoice PDF. Deterministic: same input, byte-identical output. |
 | `pdf_extract_pages` | Keep only the listed pages, in the order given (also reorders and duplicates) → write the result. |
