@@ -16,7 +16,7 @@
 
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { constants as fsc } from 'node:fs';
-import { lstat, open, readFile, realpath } from 'node:fs/promises';
+import { type FileHandle, lstat, open, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
@@ -104,11 +104,41 @@ export const looksLikePdf = (b: Uint8Array): boolean =>
 const looksLikeWholePdf = (b: Uint8Array): boolean =>
   looksLikePdf(b) && Buffer.from(b.subarray(Math.max(0, b.byteLength - 1024))).includes('%%EOF');
 
+/** O_NOFOLLOW closes the swap-to-symlink race between the check and the open (0 on Windows). */
+const NOFOLLOW = fsc.O_NOFOLLOW ?? 0;
+/** O_NONBLOCK: a FIFO named x.pdf fails the isFile check instead of hanging open() forever. */
+const NONBLOCK = fsc.O_NONBLOCK ?? 0;
+
+/**
+ * A hard link shares the inode, so neither realpath nor the root check can see that the
+ * file also lives outside the root (TASK-418). Checked on the open handle, so the file
+ * read or written is the one checked.
+ */
+const assertSingleLinkFile = async (fh: FileHandle, path: string, p: string): Promise<void> => {
+  const st = await fh.stat();
+  if (!st.isFile()) throw new Error(`Not a regular file: ${p}`);
+  if (st.nlink > 1) {
+    throw new Error(`Refusing: ${p} has ${st.nlink} hard links, so its path does not prove it is inside the allowed directories`);
+  }
+  // The checked path must still name the opened file: catches an alias unlinked after
+  // open (nlink drops back to 1) and, on Windows where O_NOFOLLOW is 0, a final
+  // component swapped for a symlink between the check and the open.
+  const now = await lstat(path).catch(() => undefined);
+  if (!now || now.dev !== st.dev || now.ino !== st.ino) throw new Error(`Refusing: ${p} changed while it was being opened`);
+};
+
 const readLocalPdf = async (p: string): Promise<Uint8Array> => {
   assertPdfExt(p);
   const real = await realpath(resolve(p));
   await assertInRoot(real, p);
-  const buf = await readFile(real);
+  const fh = await open(real, fsc.O_RDONLY | NOFOLLOW | NONBLOCK);
+  let buf: Buffer;
+  try {
+    await assertSingleLinkFile(fh, real, p);
+    buf = await fh.readFile();
+  } finally {
+    await fh.close();
+  }
   if (!looksLikeWholePdf(buf)) throw new Error(`${p} is not a PDF (no %PDF header or %%EOF trailer)`);
   return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
 };
@@ -125,19 +155,21 @@ export const checkOutputPath = async (p: string): Promise<string> => {
   const st = await lstat(target).catch(() => undefined);
   if (st?.isSymbolicLink()) throw new Error(`Refusing to write through a symlink: ${p}`);
   if (st && !st.isFile()) throw new Error(`Output path exists and is not a file: ${p}`);
+  // Early refusal before the API call; writeOutputPdf re-checks on the open handle.
+  if (st && st.nlink > 1) throw new Error(`Refusing: ${p} has ${st.nlink} hard links, so its path does not prove it is inside the allowed directories`);
   return target;
 };
-
-/** O_NOFOLLOW closes the swap-to-symlink race between the check and the write (0 on Windows). */
-const NOFOLLOW = fsc.O_NOFOLLOW ?? 0;
 
 /** Write produced PDF bytes to a checked output path; returns the path written. */
 export const writeOutputPdf = async (p: string, bytes: Uint8Array): Promise<string> => {
   const target = await checkOutputPath(p);
   if (!looksLikePdf(bytes)) throw new Error('Refusing to write: the API response is not a PDF');
-  const fh = await open(target, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_TRUNC | NOFOLLOW, 0o644);
+  // No O_TRUNC: truncating before the link check would already destroy a hard-linked file.
+  const fh = await open(target, fsc.O_WRONLY | fsc.O_CREAT | NOFOLLOW | NONBLOCK, 0o644);
   try {
-    await fh.writeFile(bytes);
+    await assertSingleLinkFile(fh, target, p);
+    await fh.truncate(0);
+    await fh.writeFile(bytes); // position is still 0 after the truncate
   } finally {
     await fh.close();
   }
@@ -225,6 +257,7 @@ const fetchUrl = async (source: string, fetchImpl: typeof fetch, lookupImpl: Loo
     await res.body?.cancel().catch(() => {});
     const location = res.headers.get('location');
     if (!location) throw new Error(`${label} redirected without a Location header`);
+    // hop counts redirects already followed, so this allows exactly MAX_REDIRECTS of them.
     if (hop >= MAX_REDIRECTS) throw new Error(`${label}: more than ${MAX_REDIRECTS} redirects`);
     url = new URL(location, parsed).href;
   }
@@ -250,6 +283,8 @@ export const resolveSource = async (
 ): Promise<Uint8Array> => {
   switch (classifySource(source)) {
     case 'data':
+      // No %PDF/%%EOF check on purpose: these are bytes the caller supplied, not a
+      // filesystem read, so there is nothing to contain and nothing to exfiltrate.
       return decodeDataUri(source);
     case 'url':
       return fetchUrl(source, fetchImpl, lookupImpl);
