@@ -16,7 +16,7 @@
 
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { constants as fsc } from 'node:fs';
-import { type FileHandle, lstat, open, realpath } from 'node:fs/promises';
+import { type FileHandle, lstat, open, readlink, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
@@ -123,8 +123,25 @@ const assertSingleLinkFile = async (fh: FileHandle, path: string, p: string): Pr
   // The checked path must still name the opened file: catches an alias unlinked after
   // open (nlink drops back to 1) and, on Windows where O_NOFOLLOW is 0, a final
   // component swapped for a symlink between the check and the open.
+  const changed = new Error(`Refusing: ${p} changed while it was being opened`);
+  // Linux names the opened file itself, which settles a parent directory swapped for a
+  // link during the open (TASK-423) with no window left. Linux only: on Windows the same
+  // string is a plain path any local process could plant. Without /proc (a bare sandbox)
+  // refuse rather than drop to the weaker check below.
+  if (process.platform === 'linux') {
+    const opened = await readlink(`/proc/self/fd/${fh.fd}`).catch(() => undefined);
+    if (opened === undefined) throw new Error(`Refusing: cannot confirm where ${p} was opened (/proc/self/fd is unreadable)`);
+    if (opened !== path) throw changed;
+  }
+  // Elsewhere (Windows junctions, macOS) the path is re-resolved around the identity check:
+  // the parent must still be the directory checked before the open, and the path must
+  // still name the opened inode. Each check needs the swap in a different state.
+  const parentIntact = async (): Promise<boolean> =>
+    (await realpath(dirname(path)).catch(() => undefined)) === dirname(path);
+  if (!(await parentIntact())) throw changed;
   const now = await lstat(path).catch(() => undefined);
-  if (!now || now.dev !== st.dev || now.ino !== st.ino) throw new Error(`Refusing: ${p} changed while it was being opened`);
+  if (!now || now.dev !== st.dev || now.ino !== st.ino) throw changed;
+  if (!(await parentIntact())) throw changed;
 };
 
 const readLocalPdf = async (p: string): Promise<Uint8Array> => {
