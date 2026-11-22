@@ -16,7 +16,7 @@
 
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { constants as fsc } from 'node:fs';
-import { type FileHandle, lstat, open, readlink, realpath } from 'node:fs/promises';
+import { type FileHandle, lstat, open, readlink, realpath, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
@@ -54,6 +54,10 @@ const decodeDataUri = (s: string): Uint8Array => {
   if (!params.includes(';base64')) {
     throw new Error('data: URI must be base64-encoded (data:application/pdf;base64,...)');
   }
+  // Refuse before decoding: base64 is 4 chars per 3 bytes.
+  if ((m[3].length * 3) / 4 > MAX_INPUT_BYTES + 3) {
+    throw new Error(`data: URI is over ${MAX_INPUT_BYTES} bytes decoded; limit is ${MAX_INPUT_BYTES}`);
+  }
   const bytes = Buffer.from(m[3].replace(/\s+/g, ''), 'base64');
   if (bytes.byteLength === 0) throw new Error('data: URI decoded to zero bytes');
   return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -82,14 +86,61 @@ const within = (root: string, p: string): boolean => {
   return rel === '' || (rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel));
 };
 
-const assertInRoot = async (real: string, original: string): Promise<void> => {
+/** The real paths of every root that contains `real`, in configured order. */
+const containingRoots = async (real: string): Promise<string[]> => {
+  const out: string[] = [];
   for (const r of allowedRoots()) {
     const rootReal = await realpath(r).catch(() => r);
-    if (within(rootReal, real)) return;
+    if (within(rootReal, real)) out.push(rootReal);
   }
-  throw new Error(
-    `${original} is outside the allowed directories (${allowedRoots().join(', ')}). Set PDFOPS_ROOT to the folder(s) holding your PDFs.`,
-  );
+  return out;
+};
+
+/** Returns the real path of the first root that contains `real`. Every failure is the same generic message. */
+const assertInRoot = async (real: string, original: string): Promise<string> => {
+  const roots = await containingRoots(real);
+  if (roots.length === 0) throw notFound(original);
+  return roots[0];
+};
+
+// A caller-supplied path is checked lexically BEFORE any filesystem call: realpath on a path
+// outside the root would tell an injected agent whether it exists, and on Windows a UNC path
+// would open a network connection. Only the configured roots themselves are resolved here.
+const lexicallyInRoot = async (abs: string): Promise<boolean> => {
+  for (const r of allowedRoots()) {
+    if (within(r, abs)) return true;
+    if (within(await realpath(r).catch(() => r), abs)) return true;
+  }
+  return false;
+};
+
+const notFound = (p: string): Error =>
+  new Error(`${p} was not found or is outside the allowed directories (${allowedRoots().join(', ')}). Set PDFOPS_ROOT to the folder(s) holding your files.`);
+
+/** open() where any failure (missing, no permission, a link swapped in) is the one generic message. */
+const openOr404 = async (path: string, flags: number, p: string, mode?: number): Promise<FileHandle> => {
+  try {
+    return await open(path, flags, mode);
+  } catch {
+    throw notFound(p);
+  }
+};
+
+const assertLexical = async (p: string, abs: string): Promise<void> => {
+  if (!(await lexicallyInRoot(abs))) throw notFound(p);
+};
+
+/** realpath with one generic failure message, whatever the reason (missing, no permission, loop). */
+const realpathOr404 = (p: string, abs: string): Promise<string> =>
+  realpath(abs).catch(() => {
+    throw notFound(p);
+  });
+
+/** Refuse over the cap from the open handle's size, before reading a byte. */
+const readCappedFile = async (fh: FileHandle, p: string, cap: number): Promise<Buffer> => {
+  const { size } = await fh.stat();
+  if (size > cap) throw new Error(`${p} is ${size} bytes; limit is ${cap}`);
+  return fh.readFile();
 };
 
 const assertPdfExt = (p: string): void => {
@@ -146,13 +197,14 @@ const assertSingleLinkFile = async (fh: FileHandle, path: string, p: string): Pr
 
 const readLocalPdf = async (p: string): Promise<Uint8Array> => {
   assertPdfExt(p);
-  const real = await realpath(resolve(p));
+  await assertLexical(p, resolve(p));
+  const real = await realpathOr404(p, resolve(p));
   await assertInRoot(real, p);
-  const fh = await open(real, fsc.O_RDONLY | NOFOLLOW | NONBLOCK);
+  const fh = await openOr404(real, fsc.O_RDONLY | NOFOLLOW | NONBLOCK, p);
   let buf: Buffer;
   try {
     await assertSingleLinkFile(fh, real, p);
-    buf = await fh.readFile();
+    buf = await readCappedFile(fh, p, MAX_INPUT_BYTES);
   } finally {
     await fh.close();
   }
@@ -160,47 +212,109 @@ const readLocalPdf = async (p: string): Promise<Uint8Array> => {
   return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
 };
 
-/** Check an output path and return the resolved path to write. Exported for tests. */
-export const checkOutputPath = async (p: string): Promise<string> => {
-  assertPdfExt(p);
+const checkOutputFile = async (p: string, ext: string): Promise<string> => {
+  if (extname(p).toLowerCase() !== ext) throw new Error(`Only ${ext} files are ${ext === '.pdf' ? 'read or written' : 'written here'}: ${p}`);
   const abs = resolve(p);
-  const parent = await realpath(dirname(abs)).catch(() => {
-    throw new Error(`Output directory does not exist: ${dirname(abs)}`);
-  });
+  await assertLexical(p, abs);
+  const parent = await realpathOr404(p, dirname(abs));
   const target = join(parent, basename(abs));
   await assertInRoot(target, p);
   const st = await lstat(target).catch(() => undefined);
   if (st?.isSymbolicLink()) throw new Error(`Refusing to write through a symlink: ${p}`);
   if (st && !st.isFile()) throw new Error(`Output path exists and is not a file: ${p}`);
-  // Early refusal before the API call; writeOutputPdf re-checks on the open handle.
+  // Early refusal before the API call; the writer re-checks on the open handle.
   if (st && st.nlink > 1) throw new Error(`Refusing: ${p} has ${st.nlink} hard links, so its path does not prove it is inside the allowed directories`);
   return target;
+};
+
+/** Check an output path and return the resolved path to write. Exported for tests. */
+export const checkOutputPath = (p: string): Promise<string> => checkOutputFile(p, '.pdf');
+
+/** Early check of an .xlsx output path, before the API call. */
+export const checkOutputXlsx = (p: string): Promise<string> => checkOutputFile(p, '.xlsx');
+
+const writeChecked = async (target: string, p: string, bytes: Uint8Array): Promise<string> => {
+  // On Linux the parent directory is opened first and every later step goes through that descriptor
+  // (/proc/self/fd/N/name), so a parent swapped for a link after this point changes nothing: the create,
+  // the check and any cleanup all act on the same directory, never on whatever the path names by then.
+  let dir: FileHandle | undefined;
+  let via = target;
+  if (process.platform === 'linux') {
+    dir = await openOr404(dirname(target), fsc.O_RDONLY | fsc.O_DIRECTORY | NOFOLLOW, p);
+    const actual = await readlink(`/proc/self/fd/${dir.fd}`).catch(() => undefined);
+    if (actual !== dirname(target)) {
+      await dir.close();
+      throw new Error(`Refusing: ${p} changed while it was being opened`);
+    }
+    via = join(`/proc/self/fd/${dir.fd}`, basename(target));
+  }
+  try {
+    // O_EXCL says whether THIS call created the file. A lstat beforehand cannot, and only a file this call
+    // created may ever be removed again.
+    // No O_TRUNC: truncating before the link check would already destroy a hard-linked file.
+    let created = true;
+    let fh: FileHandle;
+    try {
+      fh = await open(via, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | NOFOLLOW | NONBLOCK, 0o644);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw notFound(p);
+      created = false;
+      fh = await openOr404(via, fsc.O_WRONLY | NOFOLLOW | NONBLOCK, p);
+    }
+    try {
+      await assertSingleLinkFile(fh, target, p);
+      await fh.truncate(0);
+      await fh.writeFile(bytes); // position is still 0 after the truncate
+    } catch (e) {
+      // A failed check must not leave the file this call just created behind. Removed only when the inode
+      // at `via` is the one this call opened (without the descriptor, e.g. off Linux, the path itself).
+      if (created) {
+        const mine = await fh.stat().catch(() => undefined);
+        const at = await lstat(via).catch(() => undefined);
+        if (mine && at && at.ino === mine.ino && at.dev === mine.dev) await unlink(via).catch(() => {});
+      }
+      throw e;
+    } finally {
+      await fh.close();
+    }
+  } finally {
+    await dir?.close();
+  }
+  return resolve(p);
 };
 
 /** Write produced PDF bytes to a checked output path; returns the path written. */
 export const writeOutputPdf = async (p: string, bytes: Uint8Array): Promise<string> => {
   const target = await checkOutputPath(p);
   if (!looksLikePdf(bytes)) throw new Error('Refusing to write: the API response is not a PDF');
-  // No O_TRUNC: truncating before the link check would already destroy a hard-linked file.
-  const fh = await open(target, fsc.O_WRONLY | fsc.O_CREAT | NOFOLLOW | NONBLOCK, 0o644);
-  try {
-    await assertSingleLinkFile(fh, target, p);
-    await fh.truncate(0);
-    await fh.writeFile(bytes); // position is still 0 after the truncate
-  } finally {
-    await fh.close();
-  }
-  return resolve(p);
+  return writeChecked(target, p, bytes);
+};
+
+/** An API PDF result starts with %PDF- at offset 0 (the tolerant looksLikePdf is for inputs). */
+export const startsWithPdf = (b: Uint8Array): boolean =>
+  b.byteLength >= 5 && b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46 && b[4] === 0x2d;
+
+/** A zip with a local file header at offset 0 and an end-of-central-directory record near the end. */
+export const looksLikeXlsx = (b: Uint8Array): boolean => {
+  if (!(b.byteLength > 22 && b[0] === 0x50 && b[1] === 0x4b && b[2] === 3 && b[3] === 4)) return false;
+  const tail = Buffer.from(b.subarray(Math.max(0, b.byteLength - 65_557)));
+  return tail.includes(Buffer.from([0x50, 0x4b, 5, 6]));
+};
+
+/** Write the workbook to a checked .xlsx path; returns the path written. */
+export const writeOutputXlsx = async (p: string, bytes: Uint8Array): Promise<string> => {
+  const target = await checkOutputXlsx(p);
+  if (!looksLikeXlsx(bytes)) throw new Error('Refusing to write: the API response is not an xlsx workbook');
+  return writeChecked(target, p, bytes);
 };
 
 /** Check an output directory (pdf_split) and return its resolved path. */
 export const checkOutputDir = async (d: string): Promise<string> => {
-  const real = await realpath(resolve(d)).catch(() => {
-    throw new Error(`output_dir is not an existing directory: ${d}`);
-  });
+  await assertLexical(d, resolve(d));
+  const real = await realpathOr404(d, resolve(d));
   await assertInRoot(real, d);
-  const st = await lstat(real);
-  if (!st.isDirectory()) throw new Error(`output_dir is not an existing directory: ${d}`);
+  const st = await lstat(real).catch(() => null);
+  if (!st?.isDirectory()) throw notFound(d);
   return real;
 };
 
@@ -245,6 +359,81 @@ export const blockedHost = (hostname: string): boolean => {
 export type LookupFn = (host: string) => Promise<Array<{ address: string }>>;
 const defaultLookup: LookupFn = (host) => dnsLookup(host, { all: true });
 
+/** Read a response body with a running byte count, aborting as soon as it passes the cap. */
+export const readCapped = async (res: Response, cap: number, label: string): Promise<Uint8Array> => {
+  const declared = Number(res.headers.get('content-length') ?? 0);
+  if (declared > cap) {
+    await res.body?.cancel().catch(() => {});
+    throw new Error(`${label} is ${declared} bytes; limit is ${cap}`);
+  }
+  if (!res.body) return new Uint8Array(0);
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > cap) {
+      await reader.cancel().catch(() => {});
+      throw new Error(`${label} is over ${cap} bytes; limit is ${cap}`);
+    }
+    chunks.push(value);
+  }
+  return new Uint8Array(Buffer.concat(chunks));
+};
+
+/** Wrap an API response so any body read past the cap fails (a gzip bomb counts decompressed bytes). */
+export const capResponse = (res: Response, cap: number): Response => {
+  const declared = Number(res.headers.get('content-length') ?? 0);
+  if (declared > cap) {
+    void res.body?.cancel().catch(() => {});
+    throw new Error(`The API response is ${declared} bytes; limit is ${cap}`);
+  }
+  if (!res.body) return res;
+  let total = 0;
+  const limiter = new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, ctl) {
+      total += chunk.byteLength;
+      if (total > cap) ctl.error(new Error(`The API response is over ${cap} bytes; limit is ${cap}`));
+      else ctl.enqueue(chunk);
+    },
+  });
+  return new Response(res.body.pipeThrough(limiter), { status: res.status, statusText: res.statusText, headers: res.headers });
+};
+
+/**
+ * Resolve many sources with at most 4 in flight and a cumulative byte cap, in order. The cap is checked
+ * as each one lands, so nothing is uploaded when the set is too big.
+ */
+export const resolveAll = async (
+  sources: string[],
+  one: (source: string, index: number) => Promise<Uint8Array>,
+  totalCap: number,
+  what: string,
+): Promise<Uint8Array[]> => {
+  const out: Uint8Array[] = new Array(sources.length);
+  let next = 0;
+  let total = 0;
+  let stop = false;
+  const worker = async (): Promise<void> => {
+    while (!stop) {
+      const i = next++;
+      if (i >= sources.length) return;
+      try {
+        out[i] = await one(sources[i], i);
+        total += out[i].byteLength;
+        if (total > totalCap) throw new Error(`${what} together are over ${totalCap} bytes`);
+      } catch (e) {
+        stop = true;
+        throw e;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, sources.length) }, worker));
+  return out;
+};
+
 const fetchUrl = async (source: string, fetchImpl: typeof fetch, lookupImpl: LookupFn): Promise<Uint8Array> => {
   let url = source;
   let res: Response;
@@ -280,14 +469,7 @@ const fetchUrl = async (source: string, fetchImpl: typeof fetch, lookupImpl: Loo
   }
   const label = describeSource(url);
   if (!res.ok) throw new Error(`Fetching ${label} failed: HTTP ${res.status}`);
-  const declared = Number(res.headers.get('content-length') ?? 0);
-  if (declared > MAX_INPUT_BYTES) {
-    throw new Error(`${label} is ${declared} bytes; limit is ${MAX_INPUT_BYTES}`);
-  }
-  const buf = new Uint8Array(await res.arrayBuffer());
-  if (buf.byteLength > MAX_INPUT_BYTES) {
-    throw new Error(`${label} is ${buf.byteLength} bytes; limit is ${MAX_INPUT_BYTES}`);
-  }
+  const buf = await readCapped(res, MAX_INPUT_BYTES, label);
   if (buf.byteLength === 0) throw new Error(`${label} returned an empty body`);
   return buf;
 };
@@ -308,6 +490,74 @@ export const resolveSource = async (
     default:
       return readLocalPdf(source);
   }
+};
+
+/** File types a tool may read from disk besides PDFs: image inputs and attachment payloads. */
+export const IMAGE_EXTS = ['.png', '.jpg', '.jpeg'];
+export const ATTACHMENT_EXTS = ['.xml', '.csv', '.json', '.txt', '.md', '.html', '.xlsx', '.pdf', ...IMAGE_EXTS];
+
+/** PNG (89 50 4E 47) or JPEG (FF D8 FF) magic. */
+export const isImageBytes = (b: Uint8Array): boolean =>
+  (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) || (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff);
+
+/**
+ * Non-PDF local read. Stricter than readLocalPdf because the allowlist is by extension: the RESOLVED file
+ * must have an allowed extension too (a link named logo.png to .env is refused), nothing below the root
+ * may sit in a dot-prefixed file or folder (.env, .config, .docker, .claude, .credentials.json), an
+ * image-typed file must carry PNG or JPEG magic and a .pdf must pass the same check as a PDF input.
+ */
+const readLocalFile = async (p: string, exts: string[]): Promise<Uint8Array> => {
+  if (!exts.includes(extname(p).toLowerCase())) throw new Error(`Only ${exts.join(', ')} files are read here: ${p}`);
+  await assertLexical(p, resolve(p));
+  const real = await realpathOr404(p, resolve(p));
+  const roots = await containingRoots(real);
+  if (roots.length === 0) throw notFound(p);
+  const realExt = extname(real).toLowerCase();
+  if (!exts.includes(realExt)) throw new Error(`${p} resolves to a file type that is not read here`);
+  // Accepted when ANY containing root reaches the file without a dot-prefixed component.
+  if (!roots.some((r) => !relative(r, real).split(sep).some((seg) => seg.startsWith('.')))) {
+    throw new Error(`${p}: files and folders whose names start with a dot are not read`);
+  }
+  const fh = await openOr404(real, fsc.O_RDONLY | NOFOLLOW | NONBLOCK, p);
+  let buf: Buffer;
+  try {
+    await assertSingleLinkFile(fh, real, p);
+    buf = await readCappedFile(fh, p, MAX_INPUT_BYTES);
+  } finally {
+    await fh.close();
+  }
+  if (buf.byteLength === 0) throw new Error(`${p} is empty`);
+  if (realExt === '.pdf' && !looksLikeWholePdf(buf)) throw new Error(`${p} is not a PDF (no %PDF header or %%EOF trailer)`);
+  if (IMAGE_EXTS.includes(realExt) && !isImageBytes(buf)) throw new Error(`${p} is not a PNG or JPEG image`);
+  return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+};
+
+/** Resolve a non-PDF source (path | https URL | data: URI) to bytes; a local path must end in one of exts. */
+export const resolveFile = async (
+  source: string,
+  exts: string[],
+  fetchImpl: typeof fetch = fetch,
+  lookupImpl: LookupFn = defaultLookup,
+): Promise<Uint8Array> => {
+  switch (classifySource(source)) {
+    case 'data':
+      return decodeDataUri(source);
+    case 'url':
+      return fetchUrl(source, fetchImpl, lookupImpl);
+    default:
+      return readLocalFile(source, exts);
+  }
+};
+
+/** An image source: like resolveFile, and whatever the origin the bytes must be a PNG or JPEG. */
+export const resolveImage = async (
+  source: string,
+  fetchImpl: typeof fetch = fetch,
+  lookupImpl: LookupFn = defaultLookup,
+): Promise<Uint8Array> => {
+  const b = await resolveFile(source, IMAGE_EXTS, fetchImpl, lookupImpl);
+  if (!isImageBytes(b)) throw new Error(`${describeSource(source)} is not a PNG or JPEG image`);
+  return b;
 };
 
 type TextContent = { type: 'text'; text: string };

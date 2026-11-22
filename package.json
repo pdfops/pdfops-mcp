@@ -1,8 +1,8 @@
 {
   "name": "pdfops-mcp",
-  "version": "0.4.5",
+  "version": "0.5.0",
   "mcpName": "dev.pdfops/pdfops-mcp",
-  "description": "MCP server for the PDFops API — give AI agents deterministic PDF tools: inspect AcroForm fields, fill forms, merge PDFs, generate invoices, and edit PDFs: extract, delete, rotate and split pages, add watermarks and page numbers, unlock and protect, and read or set metadata. Works with Claude Code, Claude Desktop, Cursor, and any MCP client.",
+  "description": "MCP server for the PDFops API — give AI agents deterministic PDF tools: inspect AcroForm fields, fill forms, merge PDFs, generate invoices, create PDFs from text, HTML or images, read text and tables, and edit PDFs: extract, delete, rotate and split pages, add watermarks and page numbers, stamp text, images and barcodes, add form fields, embed files, unlock and protect, and read or set metadata. Works with Claude Code, Claude Desktop, Cursor, and any MCP client.",
   "keywords": [
     "mcp",
     "model-context-protocol",
@@ -26,6 +26,7 @@
   "type": "module",
   "scripts": {
     "build": "rm -rf dist && tsc",
+    "test": "node --test test/*.test.mjs",
     "prepare": "npm run build"
   },
   "bin": {

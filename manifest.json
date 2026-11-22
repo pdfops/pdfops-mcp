@@ -2,9 +2,9 @@
   "manifest_version": "0.3",
   "name": "pdfops-mcp",
   "display_name": "PDFops — fill, merge, split, edit, invoice PDFs",
-  "version": "0.4.5",
-  "description": "Deterministic PDF tools for agents: inspect AcroForm fields, fill forms, merge PDFs, generate invoices, edit pages, watermark, protect and read or set metadata.",
-  "long_description": "Gives Claude local PDF tools backed by the PDFops API (https://pdfops.dev): list a PDF's form fields with a paste-ready fill template, fill AcroForm fields (optionally flattening), merge PDFs in order, generate deterministic invoice PDFs from structured data, and edit PDFs: extract, delete, rotate and split pages, add watermarks and page numbers, unlock or password-protect, and read or set document metadata. Inputs are file paths, https URLs or data URIs; outputs are written to a path or returned inline. Works keyless (100 requests/IP/month) or with a free API key (250/month, no card).",
+  "version": "0.5.0",
+  "description": "Deterministic PDF tools for agents: inspect AcroForm fields, fill forms, merge PDFs, generate invoices and Factur-X e-invoices, create PDFs from text, HTML or images, read text and tables, edit, watermark, protect and read or set metadata.",
+  "long_description": "Gives Claude local PDF tools backed by the PDFops API (https://pdfops.dev): list a PDF's form fields with a paste-ready fill template, fill AcroForm fields (optionally flattening), merge PDFs in order, generate deterministic invoice PDFs from structured data (optionally as Factur-X e-invoices), create PDFs from Markdown, text, CSV, HTML or images, read text and tables out of PDFs (tables optionally as an Excel workbook), find text with page positions, and edit PDFs: extract, delete, rotate and split pages, add watermarks and page numbers, stamp text, images and barcodes, add form fields, embed files, unlock or password-protect, and read or set document metadata. Inputs are file paths, https URLs or data URIs; outputs are written to a path or returned inline. Works keyless (100 requests/IP/month) or with a free API key (250/month, no card).",
   "author": { "name": "PDFops", "email": "hello@pdfops.dev", "url": "https://github.com/pdfops" },
   "repository": { "type": "git", "url": "https://github.com/pdfops/pdfops-mcp.git" },
   "homepage": "https://pdfops.dev",
@@ -35,6 +35,14 @@
     { "name": "pdf_protect", "description": "Encrypt a PDF with user/owner passwords and permissions" },
     { "name": "pdf_metadata", "description": "Read page count, page sizes, document info and form field count" },
     { "name": "pdf_set_metadata", "description": "Write title, author, subject, creator and keywords" },
+    { "name": "pdf_edit", "description": "Stamp text, images and barcodes or QR codes at exact positions" },
+    { "name": "pdf_extract_text", "description": "Read text and tables of a born-digital PDF; tables as JSON, CSV or an xlsx workbook" },
+    { "name": "pdf_find_text", "description": "Search a PDF for text or a regex and get page positions" },
+    { "name": "pdf_text_to_pdf", "description": "Make a PDF from Markdown, plain text or CSV" },
+    { "name": "pdf_html_to_pdf", "description": "Render an HTML string to a PDF" },
+    { "name": "pdf_image_to_pdf", "description": "Make a PDF from JPG and PNG images" },
+    { "name": "pdf_add_fields", "description": "Create fillable form fields at exact positions" },
+    { "name": "pdf_add_attachment", "description": "Embed files in a PDF" },
     { "name": "pdfops_usage", "description": "Check the quota of the configured API key" }
   ],
   "keywords": ["pdf", "acroform", "fill-pdf", "merge-pdf", "split-pdf", "invoice", "forms"],
@@ -56,7 +64,7 @@
     "pdfops_root": {
       "type": "directory",
       "title": "PDF folder",
-      "description": "The only folder PDFops may read PDFs from and write PDFs to (subfolders included). Defaults to your home folder.",
+      "description": "The only folder tools read from and write to (subfolders included). PDFs are read and written here; images (.png, .jpg), attachment files (.xml, .csv, .json, .txt, .md, .html, .xlsx) and .xlsx workbooks are read or written here too. Files and folders whose names start with a dot are never read. Defaults to your home folder.",
       "default": "${HOME}",
       "required": false
     }
