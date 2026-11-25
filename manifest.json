@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "pdfops-mcp",
   "display_name": "PDFops — fill, merge, split, edit, invoice PDFs",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Deterministic PDF tools for agents: inspect AcroForm fields, fill forms, merge PDFs, generate invoices and Factur-X e-invoices, create PDFs from text, HTML or images, read text and tables, edit, watermark, protect and read or set metadata.",
   "long_description": "Gives Claude local PDF tools backed by the PDFops API (https://pdfops.dev): list a PDF's form fields with a paste-ready fill template, fill AcroForm fields (optionally flattening), merge PDFs in order, generate deterministic invoice PDFs from structured data (optionally as Factur-X e-invoices), create PDFs from Markdown, text, CSV, HTML or images, read text and tables out of PDFs (tables optionally as an Excel workbook), find text with page positions, and edit PDFs: extract, delete, rotate and split pages, add watermarks and page numbers, stamp text, images and barcodes, add form fields, embed files, unlock or password-protect, and read or set document metadata. Inputs are file paths, https URLs or data URIs; outputs are written to a path or returned inline. Works keyless (100 requests/IP/month) or with a free API key (250/month, no card).",
   "author": { "name": "PDFops", "email": "hello@pdfops.dev", "url": "https://github.com/pdfops" },
@@ -41,7 +41,8 @@
     { "name": "pdf_text_to_pdf", "description": "Make a PDF from Markdown, plain text or CSV" },
     { "name": "pdf_html_to_pdf", "description": "Render an HTML string to a PDF" },
     { "name": "pdf_image_to_pdf", "description": "Make a PDF from JPG and PNG images" },
-    { "name": "pdf_add_fields", "description": "Create fillable form fields at exact positions" },
+    { "name": "pdf_detect_fields", "description": "Detect the fields drawn on a flat PDF (lines, boxes, underscores, checkboxes) for review" },
+    { "name": "pdf_add_fields", "description": "Create fillable form fields at exact positions, or detect them on a flat PDF" },
     { "name": "pdf_add_attachment", "description": "Embed files in a PDF" },
     { "name": "pdfops_usage", "description": "Check the quota of the configured API key" }
   ],

@@ -13,8 +13,8 @@
 // Tools: pdf_inspect, pdf_fill, pdf_merge, pdf_invoice, pdfops_usage,
 // pdf_extract_pages, pdf_delete_pages, pdf_rotate, pdf_split, pdf_watermark,
 // pdf_page_numbers, pdf_unlock, pdf_protect, pdf_metadata, pdf_set_metadata,
-// pdf_edit, pdf_extract_text, pdf_text_to_pdf, pdf_find_text, pdf_add_fields,
-// pdf_image_to_pdf, pdf_add_attachment, pdf_html_to_pdf.
+// pdf_edit, pdf_extract_text, pdf_text_to_pdf, pdf_find_text, pdf_detect_fields,
+// pdf_add_fields, pdf_image_to_pdf, pdf_add_attachment, pdf_html_to_pdf.
 //
 // Env:
 //   PDFOPS_API_KEY  optional — free key from https://pdfops.dev/pricing
@@ -744,14 +744,17 @@ const api = async (path: string, init: { body: FormData | string; json?: boolean
   if (!res.ok) {
     let code = `http_${res.status}`;
     let details = res.statusText;
+    let errBody: unknown;
     try {
       const body = (await res.json()) as { error?: string; details?: string };
+      errBody = body;
       if (typeof body.error === 'string' && body.error) code = body.error;
       if (typeof body.details === 'string' && body.details) details = body.details;
     } catch {
       // not JSON: keep the status text
     }
-    throw new PdfOpsError(res.status, capText(code), capText(details));
+    // The parsed body is untrusted: callers read it key by key and validate every value (see pdf_add_fields detect).
+    throw Object.assign(new PdfOpsError(res.status, capText(code), capText(details)), { body: errBody });
   }
   return res;
 };
@@ -776,6 +779,14 @@ const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.s
 
 // Response headers are untrusted. Each validator returns a safe value (or nothing), so the caller can
 // compute every extra before any file is written and none of them can fail a call afterwards.
+// A page spec ("1-3,5,9-") from the API. Up to 2,000 pages can be left, so the odd pages of a long file are about 9 KB.
+const SPEC = /^[0-9,-]{1,10000}$/;
+// Page numbers (untrusted) as the {page, reason} entries pdf_detect_fields returns.
+const skippedPages = (items: { page?: unknown; reason?: unknown }[]): { page: number; reason: 'too_complex' | 'deadline' }[] =>
+  items
+    .map((k) => ({ page: Number(k.page), reason: k.reason === 'deadline' ? ('deadline' as const) : ('too_complex' as const) }))
+    .filter((k) => Number.isInteger(k.page) && k.page > 0 && k.page <= 100000)
+    .slice(0, 2000);
 const intHeader = (v: string | null): number | undefined => (v !== null && /^\d{1,9}$/.test(v) ? Number(v) : undefined);
 
 const warningHeader = (v: string | null): string | undefined =>
@@ -1129,16 +1140,79 @@ server.registerTool(
 );
 
 server.registerTool(
+  'pdf_detect_fields',
+  {
+    title: 'Detect fillable fields in a flat PDF',
+    description:
+      "Use on a flat PDF (one with no fillable fields: pdf_inspect lists none) before adding fields: it detects blanks that are drawn on the page as lines, boxes, underscores and checkboxes and returns a text or checkbox field for each, named from the nearest printed label, with a confidence from 0 to 1. Detect, review, then add and fill: look the list over (drop wrong ones, rename, adjust), pass the entries you keep to pdf_add_fields as fields (label and confidence may stay, they are ignored), then fill the result with pdf_fill. The same step in one call: pdf_add_fields with detect true. Each entry has type, name, page, x, y, width, height in PDF points from the bottom-left of the page as the viewer sees it, the frame pdf_add_fields and pdf_edit use. It does not find fields that are not drawn (a blank area with no line or box, a scanned image, shaded cells with no outline), and some detections are table cells or rules that are not blanks, so results are suggestions to review, not a guarantee. It finds blanks that are drawn as lines, boxes, underscores and checkboxes; it does not find a field that has nothing drawn. Review the result before relying on it. Pages are read with min_confidence (default 0.4, raise it to 0.6 for fewer but surer fields) and max_pages (default 40, at most 100). At most 200 fields per call, and a call stops at its time and work limit, so a large form can take several calls. While truncated is true: add the returned fields to the PDF (pdf_add_fields with fields), then call pdf_detect_fields on the resulting PDF with pages set to next_pages (exactly the pages not done, including a page cut at 200 fields; a sparse selection stays sparse); repeat until truncated is false. Sending the original PDF again repeats the same names and is not supported. pages_skipped lists pages not analysed: reason too_complex (more drawn shapes or text than the per-page limits; sending them again gives the same answer) or deadline (the call stopped first; they are in next_pages). Zero fields is a normal answer with a note. Read-only: the source is never modified.",
+    inputSchema: {
+      pdf_path: z.string().describe(SOURCE_DOC),
+      pages: z.string().optional().describe('Pages to analyse, 1-based: "1-3,5,8-". Default: all pages (up to max_pages).'),
+      max_pages: z.number().int().min(1).max(100).optional().describe('Analyse at most this many pages. Default 40.'),
+      min_confidence: z.number().min(0).max(1).optional().describe('Drop fields below this confidence. Default 0.4 (drops only the weakest candidates, such as unlabelled shapes); 0.6 gives slightly higher precision and about a quarter fewer checkboxes.'),
+      password: z.string().optional().describe(PASSWORD_DOC),
+    },
+    outputSchema: {
+      count: z.number().int().describe('Fields returned'),
+      truncated: z.boolean().describe('The answer is incomplete (more pages than max_pages, more than 200 fields, or the call stopped at its limit): add the returned fields to the PDF, then send the resulting PDF again with pages set to next_pages; repeat until truncated is false'),
+      next_page: z.number().int().nullable().describe('First page not returned, or null when finished'),
+      next_pages: z.string().nullable().describe('Page spec of exactly the pages not done (including a page cut at 200 fields), or null when finished'),
+      pages_skipped: z.array(z.object({ page: z.number().int(), reason: z.enum(['too_complex', 'deadline']) })).optional().describe('Pages not analysed: too_complex (more drawn shapes or text than the per-page limits; sending them again gives the same answer) or deadline (the call stopped first; they are in next_pages)'),
+      pages: z.array(z.object({ page: z.number().int(), width: z.number(), height: z.number(), fields: z.number().int() })),
+      fields: z.array(
+        z.object({
+          type: z.enum(['text', 'checkbox']),
+          name: z.string().describe('Taken from the nearest printed label; unique, no dot'),
+          page: z.number().int(),
+          x: z.number().describe("Left edge in points from the page's left"),
+          y: z.number().describe("Bottom edge in points from the page's bottom"),
+          width: z.number(),
+          height: z.number(),
+          label: z.string().describe('The printed label the name came from, empty if none'),
+          confidence: z.number().describe('0 to 1'),
+        }),
+      ),
+      note: z.string().optional().describe('Present when no fields were found or pages were skipped'),
+    },
+    annotations: READ_ANNOTATIONS,
+  },
+  async ({ pdf_path, pages, max_pages, min_confidence, password }) => {
+    try {
+      const fd = new FormData();
+      fd.append('pdf', pdfBlob(await resolveSource(pdf_path)), 'input.pdf');
+      for (const [k, v] of Object.entries({ pages, max_pages, min_confidence, password })) {
+        if (v !== undefined) fd.append(k, String(v));
+      }
+      const b = (await (await api('/api/detect-fields', { body: fd })).json()) as Record<string, unknown>;
+      return jsonResult({
+        count: b.count,
+        truncated: b.truncated,
+        next_page: b.nextPage ?? null,
+        next_pages: b.nextPages ?? null,
+        ...(b.pagesSkipped ? { pages_skipped: b.pagesSkipped } : {}),
+        pages: b.pages,
+        fields: b.fields,
+        ...(b.note ? { note: String(b.note).replaceAll('pagesSkipped', 'pages_skipped') } : {}),
+      });
+    } catch (e) {
+      return fail(e);
+    }
+  },
+);
+
+server.registerTool(
   'pdf_add_fields',
   {
     title: 'Add fillable form fields to a PDF',
-    description: `Create standard fillable AcroForm fields in an existing PDF at exact positions: text, multiline text, checkbox, radio group, dropdown and signature box. Coordinates are PDF points measured from the bottom-left corner of the page as the viewer sees it (1 inch = 72 pt; US Letter is 612 x 792), the same frame and 1-based page numbers as pdf_edit; x and y are the field's bottom-left corner and the whole rectangle must lie inside the page (each side at least 4 pt). Every entry needs type, name and page; every type except radio also needs x, y, width and height; radio and dropdown need options. Unknown keys are rejected. A radio entry is one group whose options each carry their own value, x, y, width and height. name is 1-200 characters with no dot, unique in the request and not already a field name in the PDF (a name that equals the first part of an existing dotted name is also taken). Text takes multiline, max_length, default and font_size; checkbox takes checked; dropdown takes options (strings), default and font_size. All entries also take required, read_only, border (default true) and background (default false). font_size is a number from 1 to 200 or "auto". If omitted, text, multiline text and dropdown fields get a fixed size of min(12 pt, the largest size at which one line fits the field height), at least 4 pt, so they draw predictably when filled; a value longer than the box is then clipped, not shrunk. "auto" stores size 0, and pdf_fill then sizes the text to the box when the blank field is first filled (a short value is enlarged, a long one shrunk) and keeps that size, so a later, longer value is clipped: for predictable text omit font_size or set a number. Defaults and dropdown options use standard fonts (WinAnsi characters only: euro sign and curly quotes work, Polish L-stroke and CJK fail). The signature type creates an EMPTY signature field for a signing tool to use: nothing is signed, it is not an e-signature. At most 200 entries and 200 widgets per call, and 2,000 fields in the finished form. Fields are plain AcroForm with no JavaScript. Fill the result with pdf_fill (pdf_inspect lists the new fields). ${OUT_TAIL}`,
+    description: `Create standard fillable AcroForm fields in an existing PDF at exact positions, or (detect true) find them on a flat PDF yourself: text, multiline text, checkbox, radio group, dropdown and signature box. Coordinates are PDF points measured from the bottom-left corner of the page as the viewer sees it (1 inch = 72 pt; US Letter is 612 x 792), the same frame and 1-based page numbers as pdf_edit; x and y are the field's bottom-left corner and the whole rectangle must lie inside the page (each side at least 4 pt). Every entry needs type, name and page; every type except radio also needs x, y, width and height; radio and dropdown need options. Unknown keys are rejected. A radio entry is one group whose options each carry their own value, x, y, width and height. name is 1-200 characters with no dot, unique in the request and not already a field name in the PDF (a name that equals the first part of an existing dotted name is also taken). Text takes multiline, max_length, default and font_size; checkbox takes checked; dropdown takes options (strings), default and font_size. All entries also take required, read_only, border (default true) and background (default false). font_size is a number from 1 to 200 or "auto". If omitted, text, multiline text and dropdown fields get a fixed size of min(12 pt, the largest size at which one line fits the field height), at least 4 pt, so they draw predictably when filled; a value longer than the box is then clipped, not shrunk. "auto" stores size 0, and pdf_fill then sizes the text to the box when the blank field is first filled (a short value is enlarged, a long one shrunk) and keeps that size, so a later, longer value is clipped: for predictable text omit font_size or set a number. Defaults and dropdown options use standard fonts (WinAnsi characters only: euro sign and curly quotes work, Polish L-stroke and CJK fail). The signature type creates an EMPTY signature field for a signing tool to use: nothing is signed, it is not an e-signature. At most 200 entries and 200 widgets per call, and 2,000 fields in the finished form. Fields are plain AcroForm with no JavaScript. Fill the result with pdf_fill (pdf_inspect lists the new fields). For a flat PDF with no fillable fields, either call pdf_detect_fields first, review the suggestions and pass the ones you keep as fields, or set detect true instead of fields to detect and add in one call (text and checkbox fields only, from blanks drawn as lines, boxes, underscores and checkboxes, in one request; pages, max_pages and min_confidence apply as in pdf_detect_fields; detect cannot be combined with fields; the answer reports how many fields were added, and review is easier with pdf_detect_fields first). ${OUT_TAIL}`,
     inputSchema: {
       pdf_path: z.string().describe(SOURCE_DOC),
       fields: z
         .array(
           z.strictObject({
             type: z.enum(['text', 'checkbox', 'radio', 'dropdown', 'signature']),
+            label: z.string().optional().describe('Ignored. Lets an entry from pdf_detect_fields be passed as it is.'),
+            confidence: z.number().optional().describe('Ignored. Lets an entry from pdf_detect_fields be passed as it is.'),
             name: z.string().max(200).regex(/^[^.]+$/).describe('Field name: no dot, unique, not already in the PDF.'),
             page: z.number().int().min(1).describe('1-based page number.'),
             x: z.number().optional().describe("Left edge in points from the page's left. Not used by radio."),
@@ -1178,26 +1252,80 @@ server.registerTool(
         )
         .min(1)
         .max(200)
-        .describe('Fields to create. Nothing is added unless every entry is valid. Required keys: every entry type, name, page; text, checkbox, dropdown and signature also x, y, width, height; radio and dropdown also options (radio options carry their own rectangles).'),
+        .optional()
+        .describe('Fields to create. Required unless detect is true. Nothing is added unless every entry is valid. Required keys: every entry type, name, page; text, checkbox, dropdown and signature also x, y, width, height; radio and dropdown also options (radio options carry their own rectangles).'),
+      detect: z.boolean().optional().describe('Instead of fields: detect the blanks drawn on a flat PDF and add a text or checkbox field for each (the engine of pdf_detect_fields). Cannot be combined with fields. Default false.'),
+      pages: z.string().optional().describe('With detect: pages to analyse, "1-3,5,8-". Default all.'),
+      max_pages: z.number().int().min(1).max(100).optional().describe('With detect: analyse at most this many pages. Default 40.'),
+      min_confidence: z.number().min(0).max(1).optional().describe('With detect: drop fields below this confidence. Default 0.4.'),
       password: z.string().optional().describe(PASSWORD_DOC),
       output_path: z.string().optional().describe(OUTPUT_DOC),
     },
     outputSchema: {
       ...PDF_OUTPUT,
       warning: z.string().optional().describe('Present as xfa-layer-dropped when a hybrid AcroForm/XFA input lost its XFA layer'),
+      fields_detected: z.number().int().optional().describe('With detect: how many fields were detected and added (0 leaves the PDF unchanged)'),
+      next_pages: z.string().optional().describe('With detect: pages not done (page spec, including a page cut at 200 fields); send the returned PDF again with detect true and pages set to it'),
+      detect_truncated: z.boolean().optional().describe('With detect: the answer is incomplete (more than 200 fields, more than max_pages pages, or the call stopped at its limit); send the returned PDF again with detect true and pages set to next_pages; repeat until this is absent'),
+      pages_skipped: z.array(z.object({ page: z.number().int(), reason: z.enum(['too_complex', 'deadline']) })).optional().describe('With detect: pages not analysed because they hold more drawn shapes or text than the per-page limits'),
+      note: z.string().optional().describe('With detect and no fields found'),
     },
     annotations: WRITE_ANNOTATIONS,
   },
-  async ({ pdf_path, fields, password, output_path }) => {
+  async ({ pdf_path, fields, detect, pages, max_pages, min_confidence, password, output_path }) => {
     try {
       if (output_path) await checkOutputPath(output_path);
-      fields.forEach((f, i) =>
+      if (detect && fields !== undefined) throw new Error('detect cannot be combined with fields: send one or the other');
+      if (!detect && fields === undefined) throw new Error('fields is required unless detect is true');
+      fields?.forEach((f, i) =>
         f.options?.forEach((o, k) => {
           if (typeof o === 'object' && o.value === '') throw new Error(`fields[${i}].options[${k}].value must not be empty`);
         }),
       );
+      const source = await resolveSource(pdf_path);
+      if (detect) {
+        // One request: /api/detect-fields with format=pdf detects and adds, metered once.
+        const dfd = new FormData();
+        dfd.append('pdf', pdfBlob(source), 'input.pdf');
+        dfd.append('format', 'pdf');
+        for (const [k, v] of Object.entries({ pages, max_pages, min_confidence, password })) {
+          if (v !== undefined) dfd.append(k, String(v));
+        }
+        let res: Response;
+        try {
+          res = await api('/api/detect-fields', { body: dfd });
+        } catch (e) {
+          // Nothing detected is a 400 no_fields (no PDF is made); here it is the PDF unchanged, with the reason and the
+          // same structured keys as pdf_detect_fields. Matched on the error code.
+          if (e instanceof PdfOpsError && e.code === 'no_fields') {
+            const b = ((e as { body?: Record<string, unknown> }).body ?? {}) as Record<string, unknown>;
+            return await emitWith(source, 'fillable.pdf', 'PDF unchanged, no fields detected', output_path, {
+              fields_detected: 0,
+              ...(b.truncated === true ? { detect_truncated: true } : {}),
+              ...(typeof b.nextPages === 'string' && SPEC.test(b.nextPages) ? { next_pages: b.nextPages } : {}),
+              ...(Array.isArray(b.pagesSkipped) && b.pagesSkipped.length ? { pages_skipped: skippedPages(b.pagesSkipped.map((k) => (k ?? {}) as { page?: unknown; reason?: unknown })) } : {}),
+              note: e.message.replace(/^no_fields: /, '').replaceAll('pagesSkipped', 'pages_skipped'),
+            });
+          }
+          throw e;
+        }
+        const warning = warningHeader(res.headers.get('x-pdfops-warning'));
+        const n = intHeader(res.headers.get('x-pdfops-fields')) ?? 0;
+        const next = res.headers.get('x-pdfops-next-pages');
+        const skipped = skippedPages((res.headers.get('x-pdfops-pages-skipped') ?? '').split(',').map((page) => ({ page })));
+        return await emitWith(await bytesOf(res), 'fillable.pdf', `PDF with ${n} detected fields`, output_path, {
+          ...(warning ? { warning } : {}),
+          fields_detected: n,
+          ...(res.headers.get('x-pdfops-truncated') === 'true' ? { detect_truncated: true } : {}),
+          ...(next !== null && SPEC.test(next) ? { next_pages: next } : {}),
+          ...(skipped.length ? { pages_skipped: skipped } : {}),
+          ...(skipped.length || res.headers.get('x-pdfops-truncated') === 'true'
+            ? { note: [skipped.length ? 'Some pages were not analysed because they hold more drawn shapes or text than this endpoint reads (see pages_skipped); fields on them are not in the result.' : '', res.headers.get('x-pdfops-truncated') === 'true' && next !== null && SPEC.test(next) ? `The result is incomplete: send this PDF again with detect true and pages=${next}; repeat until detect_truncated is absent.` : ''].filter(Boolean).join(' ') }
+            : {}),
+        });
+      }
       const fd = new FormData();
-      fd.append('pdf', pdfBlob(await resolveSource(pdf_path)), 'input.pdf');
+      fd.append('pdf', pdfBlob(source), 'input.pdf');
       fd.append('fields', JSON.stringify(fields));
       if (password !== undefined) fd.append('password', password);
       const res = await api('/api/add-fields', { body: fd });

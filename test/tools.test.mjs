@@ -16,6 +16,7 @@ const NEW_TOOLS = [
   'pdf_extract_text',
   'pdf_text_to_pdf',
   'pdf_find_text',
+  'pdf_detect_fields',
   'pdf_html_to_pdf',
   'pdf_image_to_pdf',
   'pdf_add_fields',

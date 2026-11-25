@@ -73,13 +73,14 @@ Any other stdio client (Windsurf, Cline, Zed, your own agent): command `npx`, ar
 | `pdf_text_to_pdf` | Markdown, plain text or CSV → a new PDF, with no HTML engine. |
 | `pdf_html_to_pdf` | Render an HTML string to a PDF with a headless browser. Each render costs 5 requests of quota once the renderer is reached. |
 | `pdf_image_to_pdf` | JPG and PNG images → a PDF, one image per page. |
-| `pdf_add_fields` | Create fillable AcroForm fields (text, checkbox, radio, dropdown, signature box) at exact positions; fill them with `pdf_fill`. |
+| `pdf_detect_fields` | For a flat PDF with no fillable fields: detect the blanks drawn as lines, boxes, underscores and checkboxes and return text and checkbox fields (name from the nearest label, confidence, position) to review. Read-only. Detect, review, then add and fill. |
+| `pdf_add_fields` | Create fillable AcroForm fields (text, checkbox, radio, dropdown, signature box) at exact positions, or with `detect: true` detect and add them on a flat PDF; fill them with `pdf_fill`. |
 | `pdf_add_attachment` | Embed files, such as an XML or CSV data file, in a PDF. |
 | `pdfops_usage` | Quota check for the configured key. |
 
 ## Hosted endpoint (no install)
 
-PDFops also runs this server for you at `https://pdfops.dev/api/mcp` (Streamable HTTP). It works without a key (keyless trial cap of 100 calls/IP/month); a free key from <https://pdfops.dev/pricing#free-key> raises the cap:
+PDFops also runs this server for you at `https://pdfops.dev/api/mcp` (Streamable HTTP). It works without a key (keyless trial cap of 100 calls/IP/month); a free key from <https://pdfops.dev/pricing#free-key> raises the cap. Clients that support OAuth can instead sign in with an email address and a 6-digit code when the free allowance runs out (<https://pdfops.dev/mcp#sign-in>):
 
 ```bash
 claude mcp add --transport http pdfops https://pdfops.dev/api/mcp
