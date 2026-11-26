@@ -30,7 +30,7 @@ Call `pdfops_usage` (if a key is set) or `pdf_inspect` with any PDF path. A succ
 
 ## Tools
 
-- `pdf_inspect` — list AcroForm fields of a PDF (call first on unfamiliar PDFs)
+- `pdf_inspect` — list AcroForm fields of a PDF and a paste-ready fill template
 - `pdf_fill` — fill fields, optionally flatten; writes a file or returns the PDF inline
 - `pdf_merge` — merge two or more PDFs in order
 - `pdf_invoice`: generate a deterministic invoice PDF from structured data; `invoice.e_invoice: "factur-x"` makes a Factur-X (ZUGFeRD) EN 16931 e-invoice
@@ -50,7 +50,7 @@ Call `pdfops_usage` (if a key is set) or `pdf_inspect` with any PDF path. A succ
 - `pdf_text_to_pdf`: make a PDF from Markdown, plain text or CSV
 - `pdf_html_to_pdf`: render an HTML string to a PDF
 - `pdf_image_to_pdf`: make a PDF from JPG and PNG images
-- `pdf_detect_fields`: detect the fields drawn on a flat PDF (lines, boxes, underscores, checkboxes); review, then add them with `pdf_add_fields`
+- `pdf_detect_fields`: detect the fields drawn on a flat PDF (lines, boxes, underscores, checkboxes); the entries can be passed to `pdf_add_fields`
 - `pdf_add_fields`: create fillable form fields at exact positions, or `detect: true` to detect and add on a flat PDF
 - `pdf_add_attachment`: embed files in a PDF
 - `pdfops_usage` — quota for the configured key

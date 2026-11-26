@@ -53,7 +53,7 @@ Any other stdio client (Windsurf, Cline, Zed, your own agent): command `npx`, ar
 
 | Tool | What it does |
 |---|---|
-| `pdf_inspect` | List a PDF's form fields (names, types, options, values) + a paste-ready fill template. Call first on unfamiliar PDFs. |
+| `pdf_inspect` | List a PDF's form fields (names, types, options, values) + a paste-ready fill template. |
 | `pdf_fill` | Fill AcroForm fields → write the filled PDF. Optional `flatten` bakes values in and drops the form; optional `password` opens a user-password PDF. |
 | `pdf_merge` | Merge ≥2 PDFs in order → write the result. |
 | `pdf_invoice` | Structured data → complete invoice PDF. Deterministic: same input, byte-identical output. Set `invoice.e_invoice` to `"factur-x"` for a PDF/A-3 Factur-X (ZUGFeRD) e-invoice, profile EN 16931, with the XML embedded; that mode needs more fields (`invoice_number`, `date`, `currency`, `due` or `payment_terms`, seller and buyer `country`, seller `vat_id`, a unit code per item) and names every missing one in the error. |
@@ -73,8 +73,8 @@ Any other stdio client (Windsurf, Cline, Zed, your own agent): command `npx`, ar
 | `pdf_text_to_pdf` | Markdown, plain text or CSV → a new PDF, with no HTML engine. |
 | `pdf_html_to_pdf` | Render an HTML string to a PDF with a headless browser. Each render costs 5 requests of quota once the renderer is reached. |
 | `pdf_image_to_pdf` | JPG and PNG images → a PDF, one image per page. |
-| `pdf_detect_fields` | For a flat PDF with no fillable fields: detect the blanks drawn as lines, boxes, underscores and checkboxes and return text and checkbox fields (name from the nearest label, confidence, position) to review. Read-only. Detect, review, then add and fill. |
-| `pdf_add_fields` | Create fillable AcroForm fields (text, checkbox, radio, dropdown, signature box) at exact positions, or with `detect: true` detect and add them on a flat PDF; fill them with `pdf_fill`. |
+| `pdf_detect_fields` | For a flat PDF with no fillable fields: detect the blanks drawn as lines, boxes, underscores and checkboxes and return text and checkbox fields (name from the nearest label, confidence, position) to review. Read-only. The entries can be passed to `pdf_add_fields`, and `pdf_fill` then fills the result. |
+| `pdf_add_fields` | Create fillable AcroForm fields (text, checkbox, radio, dropdown, signature box) at exact positions, or with `detect: true` detect and add them on a flat PDF; `pdf_fill` fills them. |
 | `pdf_add_attachment` | Embed files, such as an XML or CSV data file, in a PDF. |
 | `pdfops_usage` | Quota check for the configured key. |
 
