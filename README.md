@@ -78,6 +78,10 @@ Any other stdio client (Windsurf, Cline, Zed, your own agent): command `npx`, ar
 | `pdf_add_attachment` | Embed files, such as an XML or CSV data file, in a PDF. |
 | `pdfops_usage` | Quota check for the configured key. |
 
+## Skill
+
+Since 0.7.0 the package ships one Agent Skill, `pdf-workflows`, served over MCP (the Skills over MCP extension) next to the tools. It tells the model in what order to call the tools: read a form's fields with `pdf_inspect` before `pdf_fill`, detect and add fields on a flat PDF, what a scan cannot do, and which calls cost more quota. Claude Code 2.1.331 or later lists it as `/pdfops:pdf-workflows` when the server is registered as `pdfops`; other clients ignore it. To turn it off in Claude Code, add a deny rule `Skill(mcp__pdfops__*)` in `/permissions`. The tools work the same with or without it.
+
 ## Hosted endpoint (no install)
 
 PDFops also runs this server for you at `https://pdfops.dev/api/mcp` (Streamable HTTP). It works without a key (keyless trial cap of 100 calls/IP/month); a free key from <https://pdfops.dev/pricing#free-key> raises the cap. Clients that support OAuth can instead sign in with an email address and a 6-digit code when the free allowance runs out (<https://pdfops.dev/mcp#sign-in>):

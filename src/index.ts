@@ -23,10 +23,15 @@
 
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { lstatSync, readFileSync } from 'node:fs';
+import { PassThrough } from 'node:stream';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { McpServer } from '@modelcontextprotocol/server';
 // Tool annotations (title + readOnlyHint/destructiveHint) are mandatory for the
 // Claude Connectors Directory and help every client show what a tool does.
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { serveStdio, StdioServerTransport } from '@modelcontextprotocol/server/stdio';
+import { SkillsExtension, memorySkillFiles } from '@modelcontextprotocol/server/ext/skills';
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { PdfOps, PdfOpsError } from 'pdfops-sdk';
 import {
@@ -51,8 +56,60 @@ import {
 // longer drift from the published one (0.2.0 shipped reporting 0.1.1).
 const { version } = createRequire(import.meta.url)('../package.json') as { version: string };
 
-const server = new McpServer({ name: 'pdfops', version });
+// Everything below, up to the final "return server", runs once per connection (serveStdio
+// calls the factory), so a server instance never shares state with another. The body is
+// deliberately not re-indented.
+//
+// The one Agent Skill ships beside dist/ (see "files" in package.json). This is the only file
+// index.ts reads: a constant path, no caller input reaches it, read once at startup. The bytes
+// go into an in-memory source, so nothing else under skills/ can ever be served. The path must
+// be a regular file (lstat: a FIFO would block startup forever, a symlink would be followed).
+// Any failure (not a regular file, missing, bad frontmatter) costs only the skill: a pdfops-mcp
+// line on stderr (the SDK may print its own warnings too), and all tools still serve.
+const SKILL_NAME = 'pdf-workflows';
+const skills = await (async () => {
+  try {
+    const skillPath = fileURLToPath(new URL(`../skills/${SKILL_NAME}/SKILL.md`, import.meta.url));
+    if (!lstatSync(skillPath).isFile()) throw new Error('SKILL.md is not a regular file');
+    const bytes = readFileSync(skillPath);
+    const catalog = await SkillsExtension.load(memorySkillFiles({ [`${SKILL_NAME}/SKILL.md`]: bytes }), { strict: true });
+    if (catalog.entries.length !== 1) throw new Error(`expected 1 skill, got ${catalog.entries.length}`);
+    return catalog;
+  } catch (e) {
+    process.stderr.write(`pdfops-mcp: skill not loaded, serving tools only: ${e instanceof Error ? e.message : String(e)}\n`);
+    return undefined;
+  }
+})();
 
+function createServer(): McpServer {
+const server = new McpServer({ name: 'pdfops', version });
+skills?.attach(server);
+
+// v2 SDK plumbing (TASK-635), both done once here so no tool registration changes.
+// 1. The SDK always advertises JSON Schema 2020-12. 0.6.1 advertised draft-07, and a client
+//    that compiles tool schemas with a draft-07 validator rejects an unknown meta-schema, so
+//    every schema is wrapped to ask zod for draft-07 instead.
+// 2. A 2026-07-28 client sends no initialize, so getClientVersion() is empty; its identity is
+//    in each request's _meta envelope. Each tool call runs inside a store holding that identity.
+type JsonSchemaStd = { jsonSchema: Record<'input' | 'output', (o: object) => unknown> };
+type ToolConfig = { inputSchema?: unknown; outputSchema?: unknown };
+type ToolCb = (...a: unknown[]) => unknown;
+type RegisterTool = (name: string, config: ToolConfig, cb: ToolCb) => unknown;
+const draft07 = (schema: z.ZodType): z.ZodType => {
+  const std = schema['~standard'] as unknown as JsonSchemaStd;
+  const convert = (io: 'input' | 'output') => (o: object) => std.jsonSchema[io]({ ...o, target: 'draft-07' });
+  return new Proxy(schema, {
+    get: (t, p) => (p === '~standard' ? { ...std, jsonSchema: { input: convert('input'), output: convert('output') } } : Reflect.get(t, p, t)),
+  });
+};
+const asObject = (s: unknown): z.ZodType | undefined => (s === undefined ? undefined : draft07('~standard' in (s as object) ? (s as z.ZodType) : z.object(s as z.ZodRawShape)));
+const clientStore = new AsyncLocalStorage<{ name?: unknown; version?: unknown } | undefined>();
+const registerTool = server.registerTool.bind(server) as unknown as RegisterTool;
+(server as unknown as { registerTool: RegisterTool }).registerTool = (name, config, cb) =>
+  registerTool(name, { ...config, inputSchema: asObject(config.inputSchema), outputSchema: asObject(config.outputSchema) }, (...a) => {
+    const ctx = a[a.length - 1] as { mcpReq?: { envelope?: Record<string, unknown> } } | undefined;
+    return clientStore.run(ctx?.mcpReq?.envelope?.['io.modelcontextprotocol/clientInfo'] as { name?: unknown; version?: unknown } | undefined, () => cb(...a));
+  });
 // Source attribution: every API call carries this server's version and the
 // MCP host app ("claude-ai/0.1.0", "cursor-vscode/1.0.0", …) taken from the
 // initialize handshake's clientInfo. Added via a fetch wrapper rather than
@@ -68,7 +125,7 @@ const MAX_ATTACH_BYTES = 3 * 1024 * 1024;
 
 // clientInfo comes from the connecting app; a non-ASCII name would make every API call throw on the header.
 const hostTag = (): string | undefined => {
-  const host = server.server.getClientVersion();
+  const host = clientStore.getStore() ?? server.server.getClientVersion();
   const clean = (v: unknown) => String(v).replace(/[^\x20-\x7e]/g, '').slice(0, 100);
   return host ? `${clean(host.name)}/${clean(host.version)}` : undefined;
 };
@@ -189,6 +246,7 @@ server.registerTool(
         .array(
           z.object({
             name: z.string(),
+            label: z.string().optional().describe('Alternate (tooltip) name, present only when the form declares one'),
             type: z.string().describe('text, checkbox, dropdown, radio, optionlist, or unsupported'),
             readOnly: z.boolean(),
             value: z.string().optional(),
@@ -1505,5 +1563,72 @@ server.registerTool(
   },
 );
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+  return server;
+}
+
+// serveStdio serves both protocol eras: 2025-era clients (initialize handshake) and
+// clients on the 2026-07-28 revision. It builds one server per connection.
+//
+// The v2 stdio transport closes on stdin EOF and aborts requests still in flight, so a client
+// that writes its requests and closes stdin (as 0.6.1 supported) never got the last answers.
+// Here real stdin is piped through a PassThrough that is ended only once every request the
+// transport has already parsed has been answered, so those answers are flushed before the
+// process exits. Pending ids come from the transport's own parsed messages (no second parse of
+// stdin, nothing buffered here). A request that is never answered (a cancelled one is dropped
+// from the count) cannot hold the process longer than DRAIN_LIMIT_MS after EOF.
+// When the transport closes for any other reason (a line over its 10 MiB bound, a stdout
+// error), stdin is unpiped and paused so the process exits, as it did before this wrapper.
+const DRAIN_LIMIT_MS = 5 * 60_000;
+const pending = new Set<string>();
+const stdin = new PassThrough();
+let eof = false;
+let drainTimer: NodeJS.Timeout | undefined;
+const settle = () => {
+  if (eof && pending.size === 0) {
+    clearTimeout(drainTimer);
+    stdin.end();
+  }
+};
+const onStdinEnd = () => {
+  eof = true;
+  drainTimer = setTimeout(() => stdin.end(), DRAIN_LIMIT_MS);
+  drainTimer.unref();
+  settle();
+};
+type Message = Parameters<StdioServerTransport['send']>[0];
+class DrainingStdio extends StdioServerTransport {
+  constructor() {
+    super(stdin);
+    // The SDK assigns onmessage after construction; wrap whatever it assigns.
+    let handler: ((m: Message) => void) | undefined;
+    Object.defineProperty(this, 'onmessage', {
+      configurable: true,
+      get: () => handler && ((m: Message) => {
+        const r = m as { id?: unknown; method?: unknown; params?: { requestId?: unknown } };
+        if (r.id !== undefined && typeof r.method === 'string') pending.add(JSON.stringify(r.id));
+        else if (r.method === 'notifications/cancelled' && r.params?.requestId !== undefined) pending.delete(JSON.stringify(r.params.requestId));
+        handler!(m);
+      }),
+      set: (h: ((m: Message) => void) | undefined) => {
+        handler = h;
+      },
+    });
+    process.stdin.pipe(stdin, { end: false });
+    process.stdin.on('end', onStdinEnd);
+  }
+  override async send(message: Message): Promise<void> {
+    await super.send(message);
+    const m = message as { id?: unknown; method?: unknown };
+    if (m.id !== undefined && m.method === undefined) pending.delete(JSON.stringify(m.id));
+    settle();
+  }
+  override async close(): Promise<void> {
+    process.stdin.unpipe(stdin);
+    process.stdin.off('end', onStdinEnd);
+    process.stdin.pause();
+    clearTimeout(drainTimer);
+    pending.clear();
+    return super.close();
+  }
+}
+serveStdio(createServer, { transport: new DrainingStdio() });

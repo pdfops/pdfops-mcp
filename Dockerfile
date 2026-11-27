@@ -13,6 +13,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/node_modules ./node_modules
+COPY skills ./skills
 COPY package.json README.md LICENSE ./
 USER node
 ENTRYPOINT ["node", "dist/index.js"]

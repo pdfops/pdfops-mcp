@@ -1,6 +1,6 @@
 # Installing pdfops-mcp (guide for AI agents such as Cline)
 
-`pdfops-mcp` is a stdio MCP server published on npm. It needs Node.js 18+ and nothing else — no build step, no native dependencies, no account (an API key is optional).
+`pdfops-mcp` is a stdio MCP server published on npm. It needs Node.js 20+ and nothing else — no build step, no native dependencies, no account (an API key is optional).
 
 ## 1. Add the server
 
@@ -27,6 +27,10 @@ Without a key the server works on the keyless trial (100 requests per IP per mon
 ## 3. Verify
 
 Call `pdfops_usage` (if a key is set) or `pdf_inspect` with any PDF path. A successful `pdf_inspect` returns JSON with `count`, `fields` and `fillTemplate`.
+
+## Skill
+
+Since 0.7.0 the server also ships one Agent Skill, `pdf-workflows`, for clients that support Skills over MCP (Claude Code 2.1.331 or later lists it as `/pdfops:pdf-workflows`; other clients ignore it). To turn it off in Claude Code, add a deny rule `Skill(mcp__pdfops__*)` in `/permissions`.
 
 ## Tools
 
