@@ -38,6 +38,7 @@ import {
   ATTACHMENT_EXTS,
   capResponse,
   checkOutputDir,
+  assertWritable,
   checkOutputPath,
   checkOutputXlsx,
   describeSource,
@@ -122,6 +123,16 @@ const MAX_ERROR_TEXT = 500;
 // Cumulative upload caps across a tool's sources, checked before anything is sent.
 const MAX_UPLOAD_BYTES = 4_500_000;
 const MAX_ATTACH_BYTES = 3 * 1024 * 1024;
+// Measured multipart framing per part (boundary, Content-Disposition, Content-Type): 129 to 175 bytes, rounded up.
+const MULTIPART_PART_BYTES = 200;
+/** The PDF plus its extra files must stay under the combined upload cap, checked before anything is sent. */
+const assertUploadFits = (pdf: Uint8Array, extra: Uint8Array[], what: string, text: string[]): void => {
+  const textBytes = text.reduce((n, t) => n + Buffer.byteLength(t), 0);
+  const framing = (1 + extra.length + text.length) * MULTIPART_PART_BYTES;
+  if (pdf.byteLength + extra.reduce((n, b) => n + b.byteLength, 0) + textBytes + framing > MAX_UPLOAD_BYTES) {
+    throw new Error(`${what} together are over ${MAX_UPLOAD_BYTES} bytes`);
+  }
+};
 
 // clientInfo comes from the connecting app; a non-ASCII name would make every API call throw on the header.
 const hostTag = (): string | undefined => {
@@ -178,7 +189,7 @@ const errText = (e: unknown): string =>
       ? e.message
       : String(e);
 
-const INVOICE_PARTY = z.object({
+const INVOICE_PARTY = z.looseObject({
   name: z.string(),
   lines: z.array(z.string()).optional(),
   country: z
@@ -335,12 +346,12 @@ server.registerTool(
     description: 'Generate an invoice PDF from structured data (seller, buyer, line items, tax); no template needed. Deterministic: the same input produces byte-identical output. Without a paid PDFops key the output carries a small "Generated with pdfops.dev" footer line. Returns the invoice written to output_path, or inline as an application/pdf resource when output_path is omitted; an existing file at output_path is overwritten. An existing invoice PDF or a fillable template is populated with pdf_fill instead. Setting invoice.e_invoice to "factur-x" produces an e-invoice instead: a PDF/A-3 file with the invoice data embedded as factur-x.xml (UN/CEFACT Cross Industry Invoice, profile EN 16931, also called COMFORT). Several more fields then become required, and a missing one fails with einvoice_fields_required naming every missing field: invoice_number, date, currency (no default), due or payment_terms, from.country and to.country (ISO 3166-1 alpha-2 codes), from.vat_id (or from.tax_id with from.registration_id), tax_category when tax_rate is 0, and a UN/ECE Recommendation 20 unit code on every item. Amounts in the XML and on the page come from the same exact decimal arithmetic: each line is rounded to 2 decimals, VAT is computed once on the summed basis. On that path text is limited to Latin letters, Latin Extended-A, the euro sign and common punctuation (other characters fail with unrenderable_text); leading and trailing whitespace is trimmed, over-long or control-character text is refused with a 400, and long text wraps onto further lines or pages on the page and is carried in full in the XML. Per-item tax fields and other unknown fields are refused, and a buyer tax_id is refused (to.vat_id carries the buyer\'s VAT number). Checked in testing with the Mustang validator 2.26.0 (PDF/A-3 via veraPDF, XSD, EN 16931 schematron); this is not a statement of legal compliance, and XRechnung and Peppol output are not produced.',
     inputSchema: {
       invoice: z
-        .object({
+        .looseObject({
           from: z.union([z.string(), INVOICE_PARTY]),
           to: z.union([z.string(), INVOICE_PARTY]),
           items: z
             .array(
-              z.object({
+              z.looseObject({
                 description: z.string(),
                 quantity: z.number().positive().optional(),
                 unit_price: z.number().nonnegative(),
@@ -534,6 +545,23 @@ server.registerTool(
       const opts = { ranges, every, password } as { ranges: string; password?: string };
       const result = await client.split(input, opts);
       if (!result.parts.every((p) => startsWithPdf(p.pdf))) throw new Error('The API response is not a PDF; refusing to use it');
+      // Response, part paths and write access are checked before the first part is written. A failure in the
+      // middle of the writes (a full disk, say) can still leave the earlier parts behind.
+      if (
+        result.parts.length === 0 ||
+        result.parts.length > 100 ||
+        result.count !== result.parts.length ||
+        !result.parts.every((p) => typeof p.pages === 'string' && Number.isSafeInteger(p.page_count) && p.page_count > 0)
+      ) {
+        throw new Error('The API response is not a valid split result; refusing to use it');
+      }
+      if (output_dir) {
+        for (const i of result.parts.keys()) {
+          const target = join(output_dir, `part-${i + 1}.pdf`);
+          await checkOutputPath(target);
+          assertWritable(target, output_dir);
+        }
+      }
       if (!output_dir && result.parts.reduce((n, p) => n + p.pdf.byteLength, 0) > MAX_INLINE_BYTES) {
         throw tooBigInline(result.parts.reduce((n, p) => n + p.pdf.byteLength, 0));
       }
@@ -687,8 +715,8 @@ server.registerTool(
     description: `Encrypt a PDF with a password. user_password is required to open the result; owner_password lifts the permission restrictions. Give at least one (each 1 to 32 Latin-1 chars). permissions lists what stays ALLOWED from print, copy, modify, annotate, fill-forms (default all, except modify when an owner password is set; an empty list allows none). Restrictions only bind viewers when an owner password is set. Not byte-deterministic (random salts). ${OUT_TAIL}`,
     inputSchema: {
       pdf_path: z.string().describe(SOURCE_DOC),
-      user_password: z.string().max(128).optional().describe('Password required to open the output'),
-      owner_password: z.string().max(128).optional().describe('Password that lifts the restrictions'),
+      user_password: z.string().max(32).optional().describe('Password required to open the output'),
+      owner_password: z.string().max(32).optional().describe('Password that lifts the restrictions'),
       permissions: z
         .array(z.enum(['print', 'copy', 'modify', 'annotate', 'fill-forms']))
         .optional()
@@ -960,11 +988,13 @@ server.registerTool(
       });
       if (fields.size > 10) throw new Error('too_many_items: at most 10 distinct images per call');
       const fd = new FormData();
-      fd.append('pdf', pdfBlob(await resolveSource(pdf_path)), 'input.pdf');
+      const pdf = await resolveSource(pdf_path);
+      fd.append('pdf', pdfBlob(pdf), 'input.pdf');
       if (password !== undefined) fd.append('password', password);
       fd.append('items', JSON.stringify(apiItems));
       const entries = [...fields];
       const images = await resolveAll(entries.map(([src]) => src), (src) => resolveImage(src), MAX_UPLOAD_BYTES, 'The images');
+      assertUploadFits(pdf, images, 'The PDF and images', [JSON.stringify(apiItems), password ?? '']);
       entries.forEach(([, field], i) => fd.append(field, fileBlob(images[i]), field));
       const bytes = await bytesOf(await api('/api/edit', { body: fd }));
       return await emit(bytes, 'edited.pdf', 'Edited PDF', output_path);
@@ -1118,7 +1148,7 @@ server.registerTool(
       output_path: z.string().optional().describe(OUTPUT_DOC),
     },
     outputSchema: PDF_OUTPUT,
-    annotations: { ...WRITE_ANNOTATIONS, openWorldHint: false, title: 'Create a PDF from Markdown, plain text or CSV' },
+    annotations: { ...WRITE_ANNOTATIONS, title: 'Create a PDF from Markdown, plain text or CSV' },
   },
   async ({ output_path, ...body }) => {
     try {
@@ -1378,7 +1408,7 @@ server.registerTool(
           ...(next !== null && SPEC.test(next) ? { next_pages: next } : {}),
           ...(skipped.length ? { pages_skipped: skipped } : {}),
           ...(skipped.length || res.headers.get('x-pdfops-truncated') === 'true'
-            ? { note: [skipped.length ? 'Some pages were not analysed because they hold more drawn shapes or text than this endpoint reads (see pages_skipped); fields on them are not in the result.' : '', res.headers.get('x-pdfops-truncated') === 'true' && next !== null && SPEC.test(next) ? `The result is incomplete: send this PDF again with detect true and pages=${next}; repeat until detect_truncated is absent.` : ''].filter(Boolean).join(' ') }
+            ? { note: [skipped.length ? 'Some pages were not analysed because they hold more drawn shapes or text than this endpoint reads (see pages_skipped); fields on them are not in the result.' : '', res.headers.get('x-pdfops-truncated') === 'true' && next !== null && SPEC.test(next) ? `The result is incomplete: a further call on this PDF with detect true and pages=${next} continues from there, and detect_truncated is absent once no page is left to continue.` : ''].filter(Boolean).join(' ') }
             : {}),
         });
       }
@@ -1478,7 +1508,8 @@ server.registerTool(
     try {
       if (output_path) await checkOutputPath(output_path);
       const fd = new FormData();
-      fd.append('pdf', pdfBlob(await resolveSource(pdf_path)), 'input.pdf');
+      const pdf = await resolveSource(pdf_path);
+      fd.append('pdf', pdfBlob(pdf), 'input.pdf');
       if (password !== undefined) fd.append('password', password);
       const options: Record<string, unknown>[] = [];
       const names = files.map((f, i) => {
@@ -1511,6 +1542,7 @@ server.registerTool(
         const { source: _source, ...rest } = f;
         options.push({ ...rest, name: names[i] });
       });
+      assertUploadFits(pdf, blobs, 'The PDF and files', [JSON.stringify(options), password ?? '']);
       fd.append('options', JSON.stringify(options));
       const res = await api('/api/attach', { body: fd });
       const found = keysHeader(res.headers.get('x-pdfops-attachment-keys'), files.length);

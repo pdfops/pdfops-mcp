@@ -15,10 +15,14 @@
 // the PDF comes back as an embedded application/pdf resource the client saves.
 
 import { lookup as dnsLookup } from 'node:dns/promises';
-import { constants as fsc } from 'node:fs';
+import { accessSync, constants as fsc, lstatSync } from 'node:fs';
 import { type FileHandle, lstat, open, readlink, realpath, unlink } from 'node:fs/promises';
+import { request as httpsRequest } from 'node:https';
+import type { LookupFunction } from 'node:net';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { Readable, Transform, pipeline } from 'node:stream';
+import { createBrotliDecompress, createGunzip, createInflate, createInflateRaw } from 'node:zlib';
 
 /** Upper bound on a fetched PDF: the API's per-PDF cap, so oversize fails here with a clear message. */
 export const MAX_INPUT_BYTES = 4 * 1024 * 1024;
@@ -290,6 +294,15 @@ export const writeOutputPdf = async (p: string, bytes: Uint8Array): Promise<stri
   return writeChecked(target, p, bytes);
 };
 
+/** An existing target must be writable; for a new one the directory must be. Throws before anything is written. */
+export const assertWritable = (target: string, dir: string): void => {
+  try {
+    accessSync(lstatSync(target, { throwIfNoEntry: false }) ? target : dir, fsc.W_OK);
+  } catch {
+    throw new Error(`${target} is not writable; nothing was written`);
+  }
+};
+
 /** An API PDF result starts with %PDF- at offset 0 (the tolerant looksLikePdf is for inputs). */
 export const startsWithPdf = (b: Uint8Array): boolean =>
   b.byteLength >= 5 && b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46 && b[4] === 0x2d;
@@ -358,6 +371,81 @@ export const blockedHost = (hostname: string): boolean => {
 
 export type LookupFn = (host: string) => Promise<Array<{ address: string }>>;
 const defaultLookup: LookupFn = (host) => dnsLookup(host, { all: true });
+
+/**
+ * One GET to `url`, connecting only to `addrs` (already checked by the caller). Host header, SNI and
+ * certificate verification still use the URL's hostname; the lookup hook just hands back the pinned
+ * addresses, so the name is never resolved a second time. No accept-encoding is sent, but a gzip, deflate
+ * or br body is still decoded here (any other encoding is refused), so the capped read counts decoded bytes.
+ * Nothing inside the response callback may throw: that would be an uncaught exception in the process.
+ */
+export type Transport = (url: URL, addrs: string[], headers: Record<string, string>, signal: AbortSignal) => Promise<Response>;
+
+export const pinnedTransport: Transport = (url, addrs, headers, signal) =>
+  new Promise((resolveRes, reject) => {
+    const entries = addrs.map((address) => ({ address, family: address.includes(':') ? 6 : 4 }));
+    const lookup = ((_host, opts, cb) => {
+      if (opts.all) (cb as unknown as (e: null, a: typeof entries) => void)(null, entries);
+      else cb(null, entries[0].address, entries[0].family);
+    }) as LookupFunction;
+    // agent: false = a fresh, unpooled socket, so no earlier connection can stand in for this pin.
+    const req = httpsRequest(url, { method: 'GET', headers, lookup, signal, agent: false }, (res) => {
+      const fail = (e: unknown): void => {
+        res.destroy();
+        reject(e instanceof RangeError || e instanceof TypeError ? new Error('the server sent an invalid HTTP response') : e);
+      };
+      try {
+        const h = new Headers();
+        for (let i = 0; i < res.rawHeaders.length; i += 2) h.append(res.rawHeaders[i], res.rawHeaders[i + 1]);
+        const status = res.statusCode ?? 0;
+        const noBody = status === 204 || status === 205 || status === 304;
+        const send = (body: Readable | null): void => {
+          try {
+            resolveRes(new Response(body && (Readable.toWeb(body) as ReadableStream<Uint8Array>), { status, statusText: res.statusMessage, headers: h }));
+          } catch (e) {
+            fail(e);
+          }
+        };
+        if (noBody) res.resume();
+        // Only a 2xx body is decoded (anything else is discarded or reported by status); a blank value is identity.
+        const enc = String(res.headers['content-encoding'] ?? '').trim().toLowerCase() || 'identity';
+        if (noBody || status < 200 || status > 299 || enc === 'identity' || res.headers['content-length'] === '0') return send(noBody ? null : res);
+        const kind = enc === 'gzip' || enc === 'x-gzip' ? 'gzip' : enc === 'deflate' ? 'deflate' : enc === 'br' ? 'br' : null;
+        if (!kind) throw new Error(`the server sent an unsupported content-encoding (${enc.slice(0, 30)})`);
+        // the declared length is the compressed size and means nothing for the decoded stream; wire bytes are bounded here
+        const declared = Number(res.headers['content-length'] ?? 0);
+        if (declared > MAX_INPUT_BYTES) throw new Error(`The compressed body is ${declared} bytes; limit is ${MAX_INPUT_BYTES}`);
+        h.delete('content-length');
+        h.delete('content-encoding');
+        let wire = 0;
+        const counter = new Transform({
+          transform(chunk, _e, cb) {
+            wire += chunk.length;
+            cb(wire > MAX_INPUT_BYTES ? new Error(`The compressed body is over ${MAX_INPUT_BYTES} bytes; limit is ${MAX_INPUT_BYTES}`) : null, chunk);
+          },
+        });
+        const start = (decoder: Transform): void => send(pipeline(res, counter, decoder, () => {}));
+        if (kind === 'gzip') start(createGunzip());
+        else if (kind === 'br') start(createBrotliDecompress());
+        else {
+          // 'deflate' is zlib-wrapped by spec but servers also send raw deflate: tell them apart by the first byte
+          res.once('readable', () => {
+            try {
+              const first: Buffer | null = res.read();
+              if (first) res.unshift(first);
+              start(first && (first[0] & 0x0f) !== 8 ? createInflateRaw() : createInflate());
+            } catch (e) {
+              fail(e);
+            }
+          });
+        }
+      } catch (e) {
+        fail(e);
+      }
+    });
+    req.on('error', reject);
+    req.end();
+  });
 
 /** Read a response body with a running byte count, aborting as soon as it passes the cap. */
 export const readCapped = async (res: Response, cap: number, label: string): Promise<Uint8Array> => {
@@ -434,9 +522,12 @@ export const resolveAll = async (
   return out;
 };
 
-const fetchUrl = async (source: string, fetchImpl: typeof fetch, lookupImpl: LookupFn): Promise<Uint8Array> => {
+const fetchUrl = async (source: string, transport: Transport, lookupImpl: LookupFn): Promise<Uint8Array> => {
   let url = source;
   let res: Response;
+  let signal: AbortSignal;
+  // a header or body stall aborts the request; say so instead of surfacing a bare 'aborted'
+  const timedOut = (e: unknown): unknown => (signal.aborted ? new Error(`Fetching ${describeSource(url)} timed out after 30 seconds`) : e);
   for (let hop = 0; ; hop++) {
     let parsed: URL;
     try {
@@ -446,18 +537,19 @@ const fetchUrl = async (source: string, fetchImpl: typeof fetch, lookupImpl: Loo
     }
     const label = describeSource(url);
     if (parsed.protocol !== 'https:') throw new Error(`${label}: only https:// URLs are fetched`);
+    if (parsed.username || parsed.password) throw new Error(`${label}: URLs with a user name or password are not fetched`);
     if (blockedHost(parsed.hostname)) throw new Error(`${label}: local, private and internal addresses are not fetched`);
     const host = parsed.hostname.replace(/^\[|\]$/g, '');
     const addrs = await lookupImpl(host).catch(() => {
       throw new Error(`${label}: host does not resolve`);
     });
+    if (addrs.length === 0) throw new Error(`${label}: host does not resolve`);
     if (addrs.some((a) => blockedHost(a.address))) {
       throw new Error(`${label}: resolves to a local, private or internal address; not fetched`);
     }
-    res = await fetchImpl(parsed.href, {
-      redirect: 'manual',
-      signal: AbortSignal.timeout(30_000),
-      headers: { accept: 'application/pdf,*/*' },
+    signal = AbortSignal.timeout(30_000);
+    res = await transport(parsed, addrs.map((a) => a.address), { accept: 'application/pdf,*/*' }, signal).catch((e) => {
+      throw timedOut(e);
     });
     if (![301, 302, 303, 307, 308].includes(res.status)) break;
     await res.body?.cancel().catch(() => {});
@@ -468,8 +560,16 @@ const fetchUrl = async (source: string, fetchImpl: typeof fetch, lookupImpl: Loo
     url = new URL(location, parsed).href;
   }
   const label = describeSource(url);
-  if (!res.ok) throw new Error(`Fetching ${label} failed: HTTP ${res.status}`);
-  const buf = await readCapped(res, MAX_INPUT_BYTES, label);
+  if (!res.ok) {
+    await res.body?.cancel().catch(() => {});
+    throw new Error(`Fetching ${label} failed: HTTP ${res.status}`);
+  }
+  const buf = await readCapped(res, MAX_INPUT_BYTES, label).catch((e) => {
+    // Node's stream adapter hands a zlib failure over as a TypeError with an empty message
+    const code = String(e?.code ?? e?.cause?.code ?? '');
+    if (!signal.aborted && (!e?.message || /^(Z_|ERR_BROTLI)/.test(code))) throw new Error(`${label}: the compressed body could not be decoded`);
+    throw timedOut(e);
+  });
   if (buf.byteLength === 0) throw new Error(`${label} returned an empty body`);
   return buf;
 };
@@ -477,7 +577,7 @@ const fetchUrl = async (source: string, fetchImpl: typeof fetch, lookupImpl: Loo
 /** Resolve a source string (path | https URL | data: URI) to PDF bytes. */
 export const resolveSource = async (
   source: string,
-  fetchImpl: typeof fetch = fetch,
+  transport: Transport = pinnedTransport,
   lookupImpl: LookupFn = defaultLookup,
 ): Promise<Uint8Array> => {
   switch (classifySource(source)) {
@@ -486,7 +586,7 @@ export const resolveSource = async (
       // filesystem read, so there is nothing to contain and nothing to exfiltrate.
       return decodeDataUri(source);
     case 'url':
-      return fetchUrl(source, fetchImpl, lookupImpl);
+      return fetchUrl(source, transport, lookupImpl);
     default:
       return readLocalPdf(source);
   }
@@ -536,14 +636,14 @@ const readLocalFile = async (p: string, exts: string[]): Promise<Uint8Array> => 
 export const resolveFile = async (
   source: string,
   exts: string[],
-  fetchImpl: typeof fetch = fetch,
+  transport: Transport = pinnedTransport,
   lookupImpl: LookupFn = defaultLookup,
 ): Promise<Uint8Array> => {
   switch (classifySource(source)) {
     case 'data':
       return decodeDataUri(source);
     case 'url':
-      return fetchUrl(source, fetchImpl, lookupImpl);
+      return fetchUrl(source, transport, lookupImpl);
     default:
       return readLocalFile(source, exts);
   }
@@ -552,10 +652,10 @@ export const resolveFile = async (
 /** An image source: like resolveFile, and whatever the origin the bytes must be a PNG or JPEG. */
 export const resolveImage = async (
   source: string,
-  fetchImpl: typeof fetch = fetch,
+  transport: Transport = pinnedTransport,
   lookupImpl: LookupFn = defaultLookup,
 ): Promise<Uint8Array> => {
-  const b = await resolveFile(source, IMAGE_EXTS, fetchImpl, lookupImpl);
+  const b = await resolveFile(source, IMAGE_EXTS, transport, lookupImpl);
   if (!isImageBytes(b)) throw new Error(`${describeSource(source)} is not a PNG or JPEG image`);
   return b;
 };

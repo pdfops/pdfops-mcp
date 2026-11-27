@@ -113,6 +113,20 @@ test('pdf_invoice forwards e_invoice to the API', async () => {
   assert.equal(sent.items[0].unit, 'C62');
 });
 
+test('pdf_invoice forwards unknown item, party and top-level keys so the API can refuse them', async () => {
+  const before = calls.length;
+  const r = await client.callTool({
+    name: 'pdf_invoice',
+    arguments: { invoice: { from: { name: 'A', branch_code: 'X1' }, to: 'B', items: [{ description: 'x', unit_price: 1, tax_rate: 7 }], extra_top: 'kept' } },
+  });
+  assert.ok(!r.isError, JSON.stringify(r.content));
+  const sent = JSON.parse(calls[before].body);
+  assert.equal(calls[before].url, '/api/invoice');
+  assert.equal(sent.items[0].tax_rate, 7);
+  assert.equal(sent.from.branch_code, 'X1');
+  assert.equal(sent.extra_top, 'kept');
+});
+
 test('pdf_extract_text xlsx comes back inline with the xlsx media type', async () => {
   const pdf = `data:application/pdf;base64,${FAKE_PDF.toString('base64')}`;
   const r = await client.callTool({ name: 'pdf_extract_text', arguments: { pdf_path: pdf, tables_format: 'xlsx' } });

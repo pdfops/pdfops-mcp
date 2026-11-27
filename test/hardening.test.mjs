@@ -3,10 +3,11 @@
 
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, statSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawn } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
+import { execFileSync, spawn } from 'node:child_process';
 import { after, before, test } from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -67,6 +68,7 @@ after(async () => {
   await client?.close();
   api?.server.close();
   other?.server.close();
+  rmSync(root, { recursive: true, force: true });
 });
 
 const attach = (source) => call('pdf_add_attachment', { pdf_path: PDF_URI, files: [{ source, name: 'n' }] });
@@ -230,6 +232,319 @@ test('3: a URL body stops being read once it passes the cap', async () => {
   });
   await assert.rejects(resolveSource('https://example.com/a.pdf', async () => new Response(body), async () => [{ address: '93.184.216.34' }]), /limit is/);
   assert.ok(pulled < 8 * 1024 * 1024, `pulled ${pulled}`);
+});
+
+test('3b: a URL fetch connects to the address that was checked, never to a second lookup', async () => {
+  const { resolveSource } = await import('../dist/source.js');
+  let lookups = 0;
+  const lookup = async () => (++lookups === 1 ? [{ address: '93.184.216.34' }] : [{ address: '127.0.0.1' }]);
+  const seen = [];
+  const transport = async (url, addrs) => {
+    seen.push({ host: url.hostname, addrs });
+    return new Response(FAKE_PDF);
+  };
+  await resolveSource('https://rebind.example.com/a.pdf', transport, lookup);
+  assert.deepEqual(seen, [{ host: 'rebind.example.com', addrs: ['93.184.216.34'] }]);
+  assert.equal(lookups, 1);
+  // every redirect hop is looked up, checked and pinned on its own
+  let n = 0;
+  const hops = [];
+  const hopLookup = async (h) => [{ address: h === 'a.example.com' ? '93.184.216.34' : h === 'b.example.com' ? '8.8.8.8' : '127.0.0.1' }];
+  const hopTransport = async (url, addrs) => {
+    hops.push([url.hostname, addrs]);
+    return n++ === 0 ? new Response(null, { status: 302, headers: { location: 'https://b.example.com/x.pdf' } }) : new Response(FAKE_PDF);
+  };
+  await resolveSource('https://a.example.com/a.pdf', hopTransport, hopLookup);
+  assert.deepEqual(hops, [['a.example.com', ['93.184.216.34']], ['b.example.com', ['8.8.8.8']]]);
+  n = 0;
+  hops.length = 0;
+  const toPrivate = async (url, addrs) => {
+    hops.push(url.hostname);
+    return new Response(null, { status: 302, headers: { location: 'https://c.example.com/x.pdf' } });
+  };
+  await assert.rejects(resolveSource('https://a.example.com/a.pdf', toPrivate, hopLookup), /private/);
+  assert.deepEqual(hops, ['a.example.com']);
+});
+
+test('3c: the real transport connects to the pinned address with the hostname for SNI, Host and the certificate', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'pdfops-mcp-tls-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const key = join(dir, 'k.pem');
+  const cert = join(dir, 'c.pem');
+  try {
+    execFileSync('openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-keyout', key, '-out', cert, '-days', '1', '-subj', '/CN=pin.example.com', '-addext', 'subjectAltName=DNS:pin.example.com'], { stdio: 'ignore', timeout: 30_000 });
+  } catch {
+    return t.skip('openssl not available');
+  }
+  // A child process, because the test CA has to be in NODE_EXTRA_CA_CERTS when node starts.
+  const script = `
+    import { createServer } from 'node:https';
+    import { readFileSync } from 'node:fs';
+    import { pinnedTransport } from ${JSON.stringify(pathToFileURL(join(HERE, '..', 'dist', 'source.js')).href)};
+    const seen = {};
+    const srv = createServer({ key: readFileSync(${JSON.stringify(key)}), cert: readFileSync(${JSON.stringify(cert)}), SNICallback: (name, cb) => { seen.sni ??= name; cb(null, undefined); } }, (req, res) => {
+      seen.host = req.headers.host; seen.accept = req.headers.accept; seen.enc = req.headers['accept-encoding'];
+      res.writeHead(200, { 'content-type': 'application/pdf' });
+      res.end('%PDF-1.4 pinned');
+    });
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    const port = srv.address().port;
+    const res = await pinnedTransport(new URL('https://pin.example.com:' + port + '/a.pdf'), ['127.0.0.1'], { accept: 'application/pdf,*/*' }, AbortSignal.timeout(5000));
+    seen.status = res.status; seen.body = await res.text(); seen.port = port;
+    // a certificate for another name must still be refused even though the address is pinned
+    seen.wrongName = await pinnedTransport(new URL('https://other.example.com:' + port + '/a.pdf'), ['127.0.0.1'], {}, AbortSignal.timeout(5000)).then(() => 'connected', (e) => e.code ?? String(e));
+    srv.close();
+    console.log(JSON.stringify(seen));
+  `;
+  const out = execFileSync(process.execPath, ['--input-type=module', '-e', script], { env: { PATH: process.env.PATH ?? '', NODE_EXTRA_CA_CERTS: cert }, encoding: 'utf8' });
+  const seen = JSON.parse(out);
+  assert.equal(seen.status, 200);
+  assert.equal(seen.body, '%PDF-1.4 pinned');
+  assert.equal(seen.sni, 'pin.example.com');
+  assert.equal(seen.host, `pin.example.com:${seen.port}`);
+  assert.equal(seen.accept, 'application/pdf,*/*');
+  assert.equal(seen.enc, undefined);
+  assert.notEqual(seen.wrongName, 'connected');
+});
+
+test('3d: pdf_split validates the whole response and every part path before writing a part', async () => {
+  reset();
+  const dir = join(root, 'split-out');
+  mkdirSync(dir);
+  const part = (pages) => ({ pages, page_count: 1, pdf: FAKE_PDF.toString('base64') });
+  // count disagrees with the parts list
+  api.handler = (req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ count: 3, parts: [part('1'), part('2')] }));
+  };
+  const bad = await call('pdf_split', { pdf_path: PDF_URI, every: 1, output_dir: dir });
+  assert.equal(bad.isError, true);
+  assert.deepEqual(readdirSync(dir), []);
+  // metadata of the second part is malformed
+  api.handler = (req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ count: 2, parts: [part('1'), { pages: 2, page_count: 'x', pdf: FAKE_PDF.toString('base64') }] }));
+  };
+  const bad2 = await call('pdf_split', { pdf_path: PDF_URI, every: 1, output_dir: dir });
+  assert.equal(bad2.isError, true);
+  assert.deepEqual(readdirSync(dir), []);
+  // the second target is a directory, so the first part must not be written either
+  mkdirSync(join(dir, 'part-2.pdf'));
+  api.handler = (req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ count: 2, parts: [part('1'), part('2')] }));
+  };
+  const bad3 = await call('pdf_split', { pdf_path: PDF_URI, every: 1, output_dir: dir });
+  assert.equal(bad3.isError, true);
+  assert.deepEqual(readdirSync(dir), ['part-2.pdf']);
+  rmSync(join(dir, 'part-2.pdf'), { recursive: true });
+  // an existing read-only target fails the preflight too, before part-1 is touched
+  if (process.getuid?.() !== 0) {
+    writeFileSync(join(dir, 'part-2.pdf'), 'old');
+    chmodSync(join(dir, 'part-2.pdf'), 0o444);
+    const bad4 = await call('pdf_split', { pdf_path: PDF_URI, every: 1, output_dir: dir });
+    assert.equal(bad4.isError, true);
+    assert.match(text(bad4), /not writable/);
+    assert.deepEqual(readdirSync(dir), ['part-2.pdf']);
+    assert.equal(readFileSync(join(dir, 'part-2.pdf'), 'utf8'), 'old');
+    rmSync(join(dir, 'part-2.pdf'));
+  }
+  // page_count must be a positive safe integer
+  api.handler = (req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ count: 1, parts: [{ pages: '1', page_count: 0, pdf: FAKE_PDF.toString('base64') }] }));
+  };
+  assert.equal((await call('pdf_split', { pdf_path: PDF_URI, every: 1, output_dir: dir })).isError, true);
+  assert.deepEqual(readdirSync(dir), []);
+  api.handler = (req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ count: 2, parts: [{ pages: '1', page_count: 1, pdf: FAKE_PDF.toString('base64') }, { pages: '2', page_count: 1, pdf: FAKE_PDF.toString('base64') }] }));
+  };
+  const ok = await call('pdf_split', { pdf_path: PDF_URI, every: 1, output_dir: dir });
+  assert.ok(!ok.isError, text(ok));
+  assert.deepEqual(readdirSync(dir).sort(), ['part-1.pdf', 'part-2.pdf']);
+});
+
+test('3e: pdf_edit and pdf_add_attachment cap the PDF and the extra files together', async () => {
+  reset();
+  const bigPdf = `data:application/pdf;base64,${Buffer.concat([FAKE_PDF, Buffer.alloc(3_000_000)]).toString('base64')}`;
+  const png = `data:image/png;base64,${Buffer.concat([PNG, Buffer.alloc(1_800_000)]).toString('base64')}`;
+  const file = `data:text/plain;base64,${Buffer.alloc(2_000_000, 97).toString('base64')}`;
+  const edit = await call('pdf_edit', { pdf_path: bigPdf, items: [{ type: 'image', page: 1, x: 1, y: 1, image: png }] });
+  assert.equal(edit.isError, true);
+  assert.match(text(edit), /PDF and images together are over/);
+  const att = await call('pdf_add_attachment', { pdf_path: bigPdf, files: [{ source: file, name: 'a.txt' }] });
+  assert.equal(att.isError, true);
+  assert.match(text(att), /PDF and files together are over/);
+  // multipart framing counts: about 4,499,900 counted bytes plus the framing of three parts is over the cap
+  const edge = `data:application/pdf;base64,${Buffer.concat([FAKE_PDF, Buffer.alloc(4_190_000 - FAKE_PDF.length)]).toString('base64')}`;
+  const edit0 = await call('pdf_edit', { pdf_path: edge, password: 'p'.repeat(309_800), items: [{ type: 'text', page: 1, x: 1, y: 1, text: 'hi' }] });
+  assert.equal(edit0.isError, true);
+  assert.match(text(edit0), /together are over/);
+  // the JSON and the password that travel in the same body count too
+  const bigPw = 'p'.repeat(700_000);
+  const nearly = `data:application/pdf;base64,${Buffer.concat([FAKE_PDF, Buffer.alloc(3_900_000)]).toString('base64')}`;
+  const edit2 = await call('pdf_edit', { pdf_path: nearly, password: bigPw, items: [{ type: 'text', page: 1, x: 1, y: 1, text: 'hi' }] });
+  assert.equal(edit2.isError, true);
+  assert.match(text(edit2), /together are over/);
+  const att2 = await call('pdf_add_attachment', { pdf_path: nearly, password: bigPw, files: [{ source: `data:text/plain;base64,${Buffer.from('x').toString('base64')}`, name: 'a.txt' }] });
+  assert.equal(att2.isError, true);
+  assert.match(text(att2), /together are over/);
+  assert.equal(api.calls.length, 0);
+});
+
+test('3f: userinfo in a URL is refused on the first hop and on a redirect; a failed status cancels the body', async () => {
+  const { resolveSource } = await import('../dist/source.js');
+  const pub = async () => [{ address: '93.184.216.34' }];
+  let calls = 0;
+  const never = async () => (calls++, new Response(FAKE_PDF));
+  await assert.rejects(resolveSource('https://user:secret@example.com/a.pdf', never, pub), /user name or password/);
+  await assert.rejects(resolveSource('https://user@example.com/a.pdf', never, pub), /user name or password/);
+  assert.equal(calls, 0);
+  const redir = async () => new Response(null, { status: 302, headers: { location: 'https://u:p@other.example.com/x.pdf' } });
+  await assert.rejects(resolveSource('https://example.com/a.pdf', redir, pub), /user name or password/);
+  let cancelled = false;
+  const body = new ReadableStream({ cancel() { cancelled = true; } });
+  await assert.rejects(resolveSource('https://example.com/a.pdf', async () => new Response(body, { status: 404 }), pub), /HTTP 404/);
+  assert.equal(cancelled, true);
+});
+
+// Raw TLS server for pinnedTransport cases, run in a child so the test CA is in NODE_EXTRA_CA_CERTS at start.
+const runTlsChild = (t, clientCode) => {
+  const dir = mkdtempSync(join(tmpdir(), 'pdfops-mcp-tls-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const key = join(dir, 'k.pem');
+  const cert = join(dir, 'c.pem');
+  try {
+    execFileSync('openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-keyout', key, '-out', cert, '-days', '1', '-subj', '/CN=pin.example.com', '-addext', 'subjectAltName=DNS:pin.example.com'], { stdio: 'ignore', timeout: 30_000 });
+  } catch {
+    return null;
+  }
+  const script = `
+    import { createServer } from 'node:tls';
+    import { readFileSync } from 'node:fs';
+    import { deflateRawSync, gzipSync } from 'node:zlib';
+    import net from 'node:net';
+    import { pinnedTransport, readCapped, resolveSource, MAX_INPUT_BYTES } from ${JSON.stringify(pathToFileURL(join(HERE, '..', 'dist', 'source.js')).href)};
+    const gz = (b) => gzipSync(b);
+    const withBody = (b) => Buffer.concat([Buffer.from('HTTP/1.1 200 OK\\r\\ncontent-encoding: gzip\\r\\ncontent-length: ' + b.length + '\\r\\nconnection: close\\r\\n\\r\\n'), b]);
+    const routes = {
+      '/s999': () => Buffer.from('HTTP/1.1 999 X\\r\\ncontent-length: 0\\r\\nconnection: close\\r\\n\\r\\n'),
+      '/badtext': () => Buffer.from('HTTP/1.1 200 O\\x01K\\r\\ncontent-length: 0\\r\\nconnection: close\\r\\n\\r\\n', 'latin1'),
+      '/gz': () => withBody(gz(Buffer.from('%PDF-1.4 decoded'))),
+      '/bomb': () => withBody(gz(Buffer.alloc(MAX_INPUT_BYTES * 3))),
+      '/corrupt': () => Buffer.concat([Buffer.from('HTTP/1.1 200 OK\\r\\ncontent-encoding: gzip\\r\\nconnection: close\\r\\n\\r\\n'), Buffer.from([0x1f, 0x8b, 8, 0]), Buffer.from('garbage garbage garbage')]),
+      '/trunc': () => Buffer.concat([Buffer.from('HTTP/1.1 200 OK\\r\\ncontent-encoding: gzip\\r\\nconnection: close\\r\\n\\r\\n'), gz(Buffer.from('%PDF-1.4 ' + 'abcdefghij'.repeat(500))).subarray(0, 40)]),
+      '/rawdeflate': () => Buffer.concat([Buffer.from('HTTP/1.1 200 OK\\r\\ncontent-encoding: deflate\\r\\nconnection: close\\r\\n\\r\\n'), deflateRawSync(Buffer.from('%PDF-1.4 raw'))]),
+      '/emptygz': () => Buffer.from('HTTP/1.1 200 OK\\r\\ncontent-encoding: gzip\\r\\ncontent-length: 0\\r\\nconnection: close\\r\\n\\r\\n'),
+      '/r302': () => Buffer.from('HTTP/1.1 302 Found\\r\\nlocation: /gz\\r\\ncontent-encoding: zstd\\r\\ncontent-length: 1\\r\\nconnection: close\\r\\n\\r\\nx'),
+      '/e404': () => Buffer.from('HTTP/1.1 404 Not Found\\r\\ncontent-encoding: zstd\\r\\ncontent-length: 1\\r\\nconnection: close\\r\\n\\r\\nx'),
+      '/blank': () => Buffer.from('HTTP/1.1 200 OK\\r\\ncontent-encoding:\\r\\ncontent-length: 8\\r\\nconnection: close\\r\\n\\r\\n%PDF-1.4'),
+      '/wire': () => Buffer.concat([Buffer.from('HTTP/1.1 200 OK\\r\\ncontent-encoding: gzip\\r\\nconnection: close\\r\\n\\r\\n'), Buffer.concat(Array.from({ length: 230000 }, () => gz(Buffer.alloc(0))))]),
+      '/wiredeclared': () => Buffer.from('HTTP/1.1 200 OK\\r\\ncontent-encoding: gzip\\r\\ncontent-length: ' + (MAX_INPUT_BYTES + 1) + '\\r\\nconnection: close\\r\\n\\r\\n'),
+      ...Object.fromEntries(['deflate', 'gzip', 'identity'].flatMap((enc) => [
+        ['/reset-' + enc, () => Object.assign(Buffer.from('HTTP/1.1 200 OK\\r\\ncontent-encoding: ' + enc + '\\r\\n\\r\\n'), { reset: true })],
+        ['/stall-' + enc, () => Object.assign(Buffer.from('HTTP/1.1 200 OK\\r\\ncontent-encoding: ' + enc + '\\r\\n\\r\\n'), { stall: true })],
+      ])),
+      '/zstd': () => Buffer.from('HTTP/1.1 200 OK\\r\\ncontent-encoding: zstd\\r\\ncontent-length: 1\\r\\nconnection: close\\r\\n\\r\\nx'),
+    };
+    const srv = createServer({ key: readFileSync(${JSON.stringify(key)}), cert: readFileSync(${JSON.stringify(cert)}) }, (sock) => {
+      sock.on('error', () => {});
+      sock.once('data', (d) => {
+        const out = routes[/GET (\\S+)/.exec(d.toString())[1]]();
+        if (out.reset) sock.write(out, () => sock.destroy());
+        else if (out.stall) sock.write(out);
+        else sock.end(out);
+      });
+    });
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    const port = srv.address().port;
+    const get = (path) => pinnedTransport(new URL('https://pin.example.com:' + port + path), ['127.0.0.1'], {}, AbortSignal.timeout(5000));
+    const out = {};
+    ${clientCode}
+    srv.close();
+    console.log(JSON.stringify(out));
+  `;
+  return JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', script], { env: { PATH: process.env.PATH ?? '', NODE_EXTRA_CA_CERTS: cert }, encoding: 'utf8', timeout: 60_000 }));
+};
+
+test('3g: a status outside 200-599 or a bad status text rejects and the process survives', async (t) => {
+  const out = runTlsChild(t, `
+    const msg = (p) => p.then(() => 'resolved', (e) => String(e.message));
+    out.s999 = await msg(get('/s999'));
+    out.badtext = await msg(get('/badtext'));
+    out.after = 'alive';
+  `);
+  if (!out) return t.skip('openssl not available');
+  assert.equal(out.after, 'alive');
+  assert.notEqual(out.s999, 'resolved');
+  assert.notEqual(out.badtext, 'resolved');
+});
+
+test('3h: gzip bodies are decoded before the cap is counted; a bomb and an unknown encoding are refused', async (t) => {
+  const out = runTlsChild(t, `
+    const msg = (p) => p.then(() => 'resolved', (e) => String(e.message));
+    const ok = await get('/gz');
+    out.gzHeaders = [ok.headers.get('content-length'), ok.headers.get('content-encoding')];
+    out.gz = Buffer.from(await readCapped(ok, MAX_INPUT_BYTES, 'x')).toString();
+    out.bomb = await msg(get('/bomb').then((r) => readCapped(r, MAX_INPUT_BYTES, 'x')));
+    out.zstd = await msg(get('/zstd'));
+    // the same through the other lookup branch (no all:true)
+    net.setDefaultAutoSelectFamily(false);
+    out.gz2 = Buffer.from(await readCapped(await get('/gz'), MAX_INPUT_BYTES, 'x')).toString();
+  `);
+  if (!out) return t.skip('openssl not available');
+  assert.deepEqual(out.gzHeaders, [null, null]);
+  assert.equal(out.gz, '%PDF-1.4 decoded');
+  assert.equal(out.gz2, '%PDF-1.4 decoded');
+  assert.match(out.bomb, /limit is/);
+  assert.match(out.zstd, /content-encoding/);
+});
+
+test('3i: decode failures, discarded bodies and wire bytes', async (t) => {
+  const out = runTlsChild(t, `
+    const msg = (p) => p.then((b) => 'ok:' + Buffer.from(b).toString(), (e) => String(e.message));
+    const viaFetchUrl = (path) => resolveSource('https://pin.example.com:' + port + path, (u, a, h, s) => pinnedTransport(u, ['127.0.0.1'], h, s), async () => [{ address: '93.184.216.34' }]);
+    out.corrupt = await msg(viaFetchUrl('/corrupt'));
+    out.trunc = await msg(viaFetchUrl('/trunc'));
+    out.raw = await msg(viaFetchUrl('/rawdeflate'));
+    out.emptygz = await msg(viaFetchUrl('/emptygz'));
+    out.r302 = await msg(viaFetchUrl('/r302'));
+    out.e404 = await msg(viaFetchUrl('/e404'));
+    out.blank = await msg(viaFetchUrl('/blank'));
+    const started = Date.now();
+    out.wire = await msg(viaFetchUrl('/wire'));
+    out.wireMs = Date.now() - started;
+    out.wiredeclared = await msg(viaFetchUrl('/wiredeclared'));
+  `);
+  if (!out) return t.skip('openssl not available');
+  assert.match(out.corrupt, /could not be decoded/);
+  assert.match(out.trunc, /could not be decoded/);
+  assert.equal(out.raw, 'ok:%PDF-1.4 raw');
+  assert.match(out.emptygz, /empty body/);
+  assert.equal(out.r302, 'ok:%PDF-1.4 decoded');
+  assert.match(out.e404, /HTTP 404/);
+  assert.equal(out.blank, 'ok:%PDF-1.4');
+  assert.match(out.wire, /limit is/);
+  assert.ok(out.wireMs < 10_000, `took ${out.wireMs} ms`);
+  assert.match(out.wiredeclared, /limit is/);
+});
+
+test('3j: a reset or a stall after the headers and before any body byte settles and the process survives for every encoding', async (t) => {
+  const out = runTlsChild(t, `
+    const msg = (p) => p.then(() => 'resolved', (e) => 'rejected:' + String(e.message));
+    const raced = (p) => Promise.race([p, new Promise((r) => setTimeout(() => r('hang'), 3000))]);
+    const body = (u, signal) => pinnedTransport(new URL('https://pin.example.com:' + port + u), ['127.0.0.1'], {}, signal).then((r) => readCapped(r, MAX_INPUT_BYTES, 'x'));
+    for (const enc of ['deflate', 'gzip', 'identity']) {
+      out['reset-' + enc] = await raced(msg(body('/reset-' + enc, AbortSignal.timeout(5000))));
+      out['stall-' + enc] = await raced(msg(body('/stall-' + enc, AbortSignal.timeout(200))));
+    }
+    out.alive = true;
+  `);
+  if (!out) return t.skip('openssl not available');
+  assert.equal(out.alive, true);
+  // every case settles (no hang) and the child survived; an identity body without content-length simply ends at the reset
+  for (const k of Object.keys(out).filter((k) => /^(reset|stall)-/.test(k))) assert.notEqual(out[k], 'hang', k);
 });
 
 // ---- 5. fan-out
